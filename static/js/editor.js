@@ -1906,7 +1906,17 @@ async function generateMagicEdit(opts) {
     return;
   }
 
-  // 2. Build the EditRequest (matches the backend's expected shape)
+  // 2. If beats were detected this session but haven't been autosaved yet,
+  //    flush them now so the backend planner can read them from the doc.
+  //    Without this, fresh-music + immediate Magic Edit silently misses
+  //    beat-snap (the doc's audio.beat_anchors is empty until autosave fires).
+  if (state.beats?.length && !state.audio?.beat_anchors?.length) {
+    showMagicLoading('Flushing beat anchors…');
+    try { await window.MC.project.save(state); }
+    catch (e) { console.warn('[magic] beat flush failed', e); }
+  }
+
+  // 3. Build the EditRequest (matches the backend's expected shape)
   const editRequest = {
     projectId:      state.project,
     duration:       parseFloat(opts.duration) || 30,
@@ -2105,15 +2115,26 @@ async function applyMagicPlan() {
   try { window.MC?.timeline?.render?.(); } catch {}
   draw(); snapshot();
 
-  // 5. Persist immediately so the user can reload and resume
-  try { await window.MC.project.save(state); }
-  catch (e) { console.warn('[magic] save after apply failed', e); }
+  // 5. Persist immediately so the user can reload and resume.
+  //    Save failure must be visible — silent persistence loss would
+  //    let the user think their edit is safe when it isn't.
+  let saveOk = true;
+  try {
+    await window.MC.project.save(state);
+  } catch (e) {
+    saveOk = false;
+    console.warn('[magic] save after apply failed', e);
+  }
 
   // 6. Close modal
   $('magic-backdrop').classList.remove('show');
   resetMagicModal();
   state._pendingPlan = null;
-  toast(`Auto-edit applied · ${plan.segments.length} segments`, { gold: true });
+  if (saveOk) {
+    toast(`Auto-edit applied · ${plan.segments.length} segments`, { gold: true });
+  } else {
+    toast('Edit applied but save failed — try saving manually');
+  }
 }
 
 async function regenerateMagicPlan() {
@@ -2281,8 +2302,9 @@ function bindMagicEdit() {
       style:    document.querySelector('.magic-chips[data-group="style"] .magic-chip.on')?.dataset.value,
       pacing:   document.querySelector('.magic-chips[data-group="pacing"] .magic-chip.on')?.dataset.value,
     };
-    close();
-    setTimeout(() => generateMagicEdit(opts), 60);
+    // The modal MUST stay open during the loading + preview phases.
+    // It only closes on explicit Apply or Cancel.
+    generateMagicEdit(opts);
   });
 }
 
