@@ -78,6 +78,8 @@ function toast(msg, opts={}) {
 // ============================================================
 //  Canvas sizing
 // ============================================================
+const ASPECT_DESC_KEY = { '16:9': 'aspect.16_9.desc', '1:1': 'aspect.1_1.desc', '9:16': 'aspect.9_16.desc' };
+
 function setAspect(aspect) {
   state.aspect = aspect;
   stageWrap.classList.remove('aspect-16-9','aspect-9-16','aspect-1-1');
@@ -88,6 +90,13 @@ function setAspect(aspect) {
   document.querySelectorAll('.aspect-segmented .aspect').forEach(b => {
     b.classList.toggle('on', b.dataset.aspect === aspect);
   });
+  // Update the descriptive subtitle
+  const desc = $('aspect-desc');
+  const key = ASPECT_DESC_KEY[aspect];
+  if (desc && key) {
+    desc.setAttribute('data-i18n', key);
+    desc.textContent = window.MC?.i18n?.t?.(key) || desc.textContent;
+  }
   if (snapSvg) snapSvg.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
   resizeCanvas();
   draw();
@@ -814,13 +823,14 @@ function tlRender() {
 
 function renderLayersPanel() {
   tlRender();
+  const t = window.MC?.i18n?.t || ((k)=>k);
   const empty = state.layers.length === 0;
   if (empty) {
     layersPanelEl.innerHTML = `
       <div class="layers-empty">
         <i data-lucide="square-stack" class="empty-icon"></i>
-        <div>No layers yet</div>
-        <div class="muted small">Add text, logo, or overlay above</div>
+        <div>${escapeHTML(t('layers.empty.title'))}</div>
+        <div class="muted small">${escapeHTML(t('layers.empty.sub'))}</div>
       </div>`;
     refreshIcons();
     return;
@@ -949,10 +959,11 @@ function renderInspector() {
   $('inspector-title').textContent = l ? (l.name || 'Layer') : 'Inspector';
 
   if (!l) {
+    const t = window.MC?.i18n?.t || ((k)=>k);
     inspectorBodyEl.innerHTML = `
       <div class="inspector-empty">
         <i data-lucide="mouse-pointer-2" class="empty-icon"></i>
-        <div class="muted small">Select a layer to edit</div>
+        <div class="muted small">${escapeHTML(t('inspector.empty'))}</div>
       </div>`;
     refreshIcons();
     return;
@@ -1746,6 +1757,23 @@ function init() {
   // Theme toggle
   applyTheme(localStorage.getItem('mc-theme') || 'dark');
   $('btn-theme')?.addEventListener('click', toggleTheme);
+
+  // Language toggle (cycles through registered languages)
+  $('btn-lang')?.addEventListener('click', () => {
+    const langs = window.MC?.i18n?.getLangs?.() || [{code:'en'}];
+    const cur = window.MC?.i18n?.getLang?.() || 'en';
+    const idx = langs.findIndex(l => l.code === cur);
+    const next = langs[(idx + 1) % langs.length].code;
+    window.MC?.i18n?.setLang?.(next);
+  });
+  // Refresh dynamic UI when language changes
+  window.addEventListener('mc-lang-change', () => {
+    renderInspector(); renderLayersPanel();
+    // Refresh aspect-desc to current language
+    const desc = $('aspect-desc');
+    const key = ASPECT_DESC_KEY[state.aspect];
+    if (desc && key && window.MC?.i18n?.t) desc.textContent = window.MC.i18n.t(key);
+  });
 
   // Playback
   $('btn-play').addEventListener('click', togglePlay);
