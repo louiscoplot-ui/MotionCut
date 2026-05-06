@@ -87,12 +87,29 @@
         </div>
       </div>
       <div id="magic-summary" class="magic-summary"></div>
+
+      <!-- Loading state (shown while clip analysis + planning runs) -->
+      <div id="magic-loading" class="magic-loading hidden">
+        <div class="magic-spinner"></div>
+        <div class="magic-loading-text" id="magic-loading-text">Analyzing clips…</div>
+        <div class="magic-loading-sub muted small" id="magic-loading-sub">FFmpeg signalstats · scene detection · sharpness sampling</div>
+      </div>
+
+      <!-- Preview state (shown after the planner returns) -->
+      <div id="magic-preview" class="magic-preview hidden"></div>
     </div>
+
     <div class="magic-foot">
       <button id="magic-cancel" class="cta-outline" data-i18n="magic.cancel">Cancel</button>
+      <button id="magic-regen"  class="cta-outline hidden">
+        <i data-lucide="rotate-ccw"></i><span>Regenerate</span>
+      </button>
       <button id="magic-go" class="cta">
         <i data-lucide="wand-sparkles"></i>
         <span data-i18n="magic.generate">Generate cinematic edit</span>
+      </button>
+      <button id="magic-apply" class="cta hidden">
+        <i data-lucide="check"></i><span>Apply edit</span>
       </button>
     </div>
   </div>

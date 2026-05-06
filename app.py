@@ -10,9 +10,20 @@ import time
 import uuid
 import shlex
 import shutil
+import tempfile
 import threading
 import subprocess
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# Pillow is used for the sharpness measurement (edge variance on sampled
+# thumbnails). See _measure_sharpness().
+try:
+    from PIL import Image, ImageFilter, ImageStat
+    _PIL_AVAILABLE = True
+except Exception:
+    _PIL_AVAILABLE = False
 from flask import (
     Flask, request, jsonify, send_from_directory,
     render_template, Response, abort, url_for
@@ -633,6 +644,581 @@ def api_project_load(pid):
         "document": doc,
         "warnings": errors if errors else None,
     })
+
+
+# ----------------------------------------------------------------------------
+# AI / Auto-Edit pipeline
+#
+# Two endpoints sit on top of FFmpeg subprocess + Pillow:
+#   POST /api/clip/analyze   — single-clip analysis, cached in ai_cache
+#   POST /api/auto-edit      — multi-clip planner, returns an EditPlan
+#
+# Analysis is FFmpeg-bound (CPU + IO), not GIL-bound, so we parallelize via
+# ThreadPoolExecutor when a request asks for many clips.
+# Per-project locks guard the project document from concurrent r/m/w when
+# the analyzer writes to ai_cache.
+# ----------------------------------------------------------------------------
+_doc_locks = defaultdict(threading.Lock)
+
+
+def _doc_lock(pid):
+    return _doc_locks[safe_project_id(pid)]
+
+
+def _read_doc(pid):
+    p = _project_doc_path(pid)
+    if not p.exists():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[ai] failed to read project doc {pid}: {e}")
+        return None
+
+
+def _write_doc_atomic(pid, doc):
+    p = _project_doc_path(pid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    tmp.replace(p)
+
+
+def _minimal_doc(pid):
+    """Minimal v1 document — used when analysis runs against a project that
+    has no saved doc yet. The user's first explicit save will overwrite it."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {
+        "schema":      SCHEMA_URL,
+        "version":     SCHEMA_VERSION,
+        "id":          safe_project_id(pid),
+        "name":        project_display_name(pid),
+        "created_at":  now,
+        "modified_at": now,
+    }
+
+
+def _get_cached_analysis(pid, filename):
+    with _doc_lock(pid):
+        doc = _read_doc(pid)
+        if not doc:
+            return None
+        return (doc.get("ai_cache") or {}).get(filename)
+
+
+def _set_cached_analysis(pid, filename, value):
+    with _doc_lock(pid):
+        doc = _read_doc(pid) or _minimal_doc(pid)
+        cache = doc.setdefault("ai_cache", {})
+        cache[filename] = value
+        doc["modified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_doc_atomic(pid, doc)
+
+
+# ---- FFmpeg-based analysis primitives ---------------------------------------
+
+# All regexes are anchored to the lavfi metadata format the filters emit.
+# Never use eval() on FFmpeg output.
+_RE_YAVG       = re.compile(r"lavfi\.signalstats\.YAVG=(-?\d+\.?\d*)")
+_RE_VDIFF      = re.compile(r"lavfi\.signalstats\.YDIF=(-?\d+\.?\d*)")  # YDIF is per-frame motion
+_RE_RMS        = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(-?\d+\.?\d*|-?inf)")
+_RE_SCENE_TIME = re.compile(r"pts_time:(\d+\.?\d*)")
+
+
+def _ffprobe_duration(path):
+    """Returns duration in seconds, or 0.0 on failure."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(path)],
+            capture_output=True, text=True, timeout=15
+        )
+        data = json.loads(out.stdout or "{}")
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video" and s.get("duration"):
+                return float(s["duration"])
+        # Fallback: format duration via probe_duration() which parses ffmpeg stderr
+        return probe_duration(path)
+    except Exception:
+        return probe_duration(path)
+
+
+def _ffmpeg_signalstats(path, debug=False, sample_every=3):
+    """
+    Run signalstats on every Nth frame, return (brightness, motion).
+
+    brightness ∈ [0,1]  — mean luma normalized from 0..255
+    motion     ∈ [0,1]  — mean YDIF (frame-to-frame luma change), normalized
+                          empirically by /30 (sharp action ≈ 30, static ≈ 0.5)
+    """
+    cmd = [
+        FFMPEG, "-i", str(path),
+        "-vf", f"select='not(mod(n\\,{sample_every}))',signalstats,metadata=mode=print:file=-",
+        "-an", "-f", "null", "-"
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return 0.5, 0.0, "" if not debug else "[timeout]"
+    raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    yavgs  = [float(m) for m in _RE_YAVG.findall(raw)]
+    vdiffs = [float(m) for m in _RE_VDIFF.findall(raw)]
+    brightness = (sum(yavgs)  / len(yavgs))  / 255.0 if yavgs  else 0.5
+    motion     = min(1.0, (sum(vdiffs) / len(vdiffs)) / 30.0) if vdiffs else 0.0
+    return brightness, motion, raw if debug else ""
+
+
+def _ffmpeg_scene_cuts(path, threshold=0.4, debug=False):
+    """Returns list of cut timestamps (seconds) where scene change > threshold."""
+    cmd = [
+        FFMPEG, "-i", str(path),
+        "-vf", f"select='gt(scene\\,{threshold})',showinfo",
+        "-an", "-f", "null", "-"
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return [], "" if not debug else "[timeout]"
+    stderr = proc.stderr or ""
+    cuts = sorted(set(round(float(m), 3) for m in _RE_SCENE_TIME.findall(stderr)))
+    return cuts, stderr if debug else ""
+
+
+def _ffmpeg_audio_energy(path, debug=False):
+    """
+    Returns audio energy ∈ [0,1].
+
+    RMS_level is dB. We clamp to [-60..0] dB and rescale linearly to [0..1]:
+    -60dB → 0 (near silence)  0dB → 1 (peak). Average over per-frame frames.
+    """
+    cmd = [
+        FFMPEG, "-i", str(path),
+        "-af", "astats=metadata=1:reset=1,ametadata=mode=print:file=-",
+        "-vn", "-f", "null", "-"
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return 0.0, "" if not debug else "[timeout]"
+    raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    vals = []
+    for m in _RE_RMS.findall(raw):
+        try:
+            v = float(m)
+            if v == float("-inf") or v != v:   # filter NaN / -inf
+                continue
+            vals.append(v)
+        except Exception:
+            pass
+    if not vals:
+        return 0.0, raw if debug else ""
+    avg_db = sum(vals) / len(vals)
+    energy = max(0.0, min(1.0, (avg_db + 60.0) / 60.0))
+    return energy, raw if debug else ""
+
+
+def _measure_sharpness(path, duration):
+    """
+    Sample 3 thumbnails (25/50/75% of duration), compute edge-image variance
+    via PIL FIND_EDGES + ImageStat, average them, normalize by /1500
+    (empirically sharp footage ≈ 800–2000, blurry < 200).
+    """
+    if not _PIL_AVAILABLE or duration < 0.5:
+        return 0.5
+    sample_times = [duration * 0.25, duration * 0.5, duration * 0.75]
+    variances = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, t in enumerate(sample_times):
+            out = os.path.join(tmp, f"thumb_{i}.jpg")
+            cmd = [FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", str(path),
+                   "-frames:v", "1", "-vf", "scale=320:-1", out]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=15)
+                if os.path.exists(out):
+                    img = Image.open(out).convert("RGB")
+                    edges = img.filter(ImageFilter.FIND_EDGES).convert("L")
+                    stat = ImageStat.Stat(edges)
+                    if stat.var:
+                        variances.append(stat.var[0])
+            except Exception:
+                pass
+    if not variances:
+        return 0.5
+    avg = sum(variances) / len(variances)
+    return max(0.0, min(1.0, avg / 1500.0))
+
+
+def _analyze_clip_file(path, debug=False):
+    """Run all analyses on one file and compose the result dict."""
+    duration = _ffprobe_duration(path)
+    if duration <= 0:
+        return {"error": "could not probe duration", "duration": 0.0}
+
+    brightness, motion, sig_raw = _ffmpeg_signalstats(path, debug=debug)
+    cuts,                cut_raw = _ffmpeg_scene_cuts(path, debug=debug)
+    audio_energy,        aud_raw = _ffmpeg_audio_energy(path, debug=debug)
+    sharpness                    = _measure_sharpness(path, duration)
+
+    # Composite score:
+    #   motion       → engaging clips score higher
+    #   sharpness    → blurry clips penalised
+    #   brightness_ok → distance from 0.5 = penalty (too dark/blown out is bad)
+    #   audio_energy → silent clips slightly down-ranked
+    brightness_ok = max(0.0, 1.0 - abs(brightness - 0.5) * 2.0)
+    score = (motion       * 0.35 +
+             sharpness    * 0.30 +
+             brightness_ok * 0.20 +
+             audio_energy * 0.15)
+
+    result = {
+        "duration":     round(duration, 3),
+        "shot_score":   round(score, 4),
+        "motion":       round(motion, 4),
+        "sharpness":    round(sharpness, 4),
+        "brightness":   round(brightness, 4),
+        "audio_energy": round(audio_energy, 4),
+        "scene_cuts":   cuts,
+        "has_face":     False,        # placeholder — MediaPipe in a future push
+        "shot_type":    "unknown",    # placeholder — classifier in a future push
+        "analyzed_at":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if debug:
+        result["debug"] = {
+            "signalstats_raw_tail": (sig_raw or "")[-2000:],
+            "scene_raw_tail":       (cut_raw or "")[-2000:],
+            "audio_raw_tail":       (aud_raw or "")[-2000:],
+        }
+    return result
+
+
+@app.route("/api/clip/analyze", methods=["POST"])
+def api_clip_analyze():
+    """
+    POST { projectId, filename, force?: bool }
+    Returns clip analysis (cached when available unless force=true).
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    pid = data.get("projectId") or "default"
+    filename = data.get("filename")
+    force = bool(data.get("force"))
+    debug = request.args.get("debug") == "1"
+
+    if not filename:
+        return jsonify({"error": "missing filename"}), 400
+
+    if not force:
+        cached = _get_cached_analysis(pid, filename)
+        if cached:
+            return jsonify({**cached, "filename": filename, "cached": True})
+
+    src = project_dir(pid) / safe_name(filename)
+    if not src.exists():
+        return jsonify({"error": f"file not found: {filename}"}), 404
+
+    try:
+        result = _analyze_clip_file(src, debug=debug)
+    except Exception as e:
+        return jsonify({"error": str(e), "filename": filename}), 500
+
+    # Cache only the non-debug payload
+    cache_payload = {k: v for k, v in result.items() if k != "debug"}
+    cache_payload["filename"] = filename
+    try:
+        _set_cached_analysis(pid, filename, cache_payload)
+    except Exception as e:
+        print(f"[ai] cache write failed for {filename}: {e}")
+
+    return jsonify({**result, "filename": filename, "cached": False})
+
+
+# ---- /api/auto-edit ----------------------------------------------------------
+
+_PACING_SEG_DUR = {"slow": 4.5, "balanced": 3.0, "fast": 1.8}
+_MIN_SEG_DUR    = 1.2
+_HEAD_TAIL_TRIM = 0.5
+_BEAT_TOLERANCE = 0.4
+
+
+def _analyze_or_cached(pid, filename):
+    """Used by /api/auto-edit. Returns the cached analysis if present;
+    otherwise runs a full analysis and caches it. Always returns a dict
+    (with an `error` key if the file can't be analysed)."""
+    cached = _get_cached_analysis(pid, filename)
+    if cached:
+        return {**cached, "filename": filename}
+    src = project_dir(pid) / safe_name(filename)
+    if not src.exists():
+        return {"filename": filename, "error": "file not found"}
+    try:
+        result = _analyze_clip_file(src)
+        result["filename"] = filename
+        _set_cached_analysis(pid, filename, result)
+        return result
+    except Exception as e:
+        return {"filename": filename, "error": str(e)}
+
+
+def _select_best_segment(clip):
+    """
+    For a single analysed clip, pick the highest-quality contiguous segment.
+    Honors scene cuts when available — picks the longest sub-segment between
+    consecutive cuts. Otherwise trims 0.5s head + tail.
+    """
+    dur = float(clip.get("duration") or 0.0)
+    cuts = list(clip.get("scene_cuts") or [])
+    if dur <= 0:
+        return None
+
+    if cuts:
+        # Build sub-segment boundaries: 0 → cut1 → cut2 → … → dur
+        bounds = [0.0] + [c for c in cuts if 0 < c < dur] + [dur]
+        # Pick the longest sub-segment ≥ MIN_SEG_DUR
+        best = None
+        for i in range(len(bounds) - 1):
+            a, b = bounds[i], bounds[i + 1]
+            length = b - a
+            if length < _MIN_SEG_DUR:
+                continue
+            if best is None or length > (best[1] - best[0]):
+                best = (a, b)
+        if best:
+            return {"start": round(best[0], 3), "end": round(best[1], 3)}
+    # No usable cuts — trim head/tail
+    if dur < _MIN_SEG_DUR + 2 * _HEAD_TAIL_TRIM:
+        return None
+    return {"start": round(_HEAD_TAIL_TRIM, 3),
+            "end":   round(dur - _HEAD_TAIL_TRIM, 3)}
+
+
+def _select_segments(analyses, total_duration, pacing):
+    """
+    Rank clips by shot_score, take their best sub-segment, fit them into the
+    target duration. Trims the last segment if it would overshoot.
+
+    Each output segment is annotated with the underlying motion score so the
+    transition assigner can read it (stripped before returning).
+    """
+    target_seg = _PACING_SEG_DUR.get(pacing, 3.0)
+    ranked = sorted(
+        [c for c in analyses if not c.get("error") and c.get("duration", 0) > 0],
+        key=lambda c: -float(c.get("shot_score") or 0),
+    )
+
+    segments = []
+    accumulated = 0.0
+    for clip in ranked:
+        if accumulated >= total_duration - 0.05:
+            break
+        sub = _select_best_segment(clip)
+        if not sub:
+            continue
+        avail = sub["end"] - sub["start"]
+        seg_len = min(target_seg, avail)
+        # Trim last segment to land exactly on total_duration
+        remaining = total_duration - accumulated
+        if seg_len > remaining:
+            seg_len = remaining
+        if seg_len < _MIN_SEG_DUR:
+            continue
+        # Centre seg_len within the available range so we use the strongest part
+        offset = (avail - seg_len) / 2.0
+        s_in = round(sub["start"] + offset, 3)
+        s_out = round(s_in + seg_len, 3)
+        segments.append({
+            "clipFilename": clip["filename"],
+            "sourceIn":     s_in,
+            "sourceOut":    s_out,
+            "_motion":      float(clip.get("motion") or 0),
+        })
+        accumulated += seg_len
+
+    # If still short on time, allow repeats of the highest-scoring clip
+    if accumulated < total_duration - 0.5 and ranked:
+        top = ranked[0]
+        sub = _select_best_segment(top)
+        while sub and accumulated < total_duration - 0.5:
+            avail = sub["end"] - sub["start"]
+            seg_len = min(target_seg, avail, total_duration - accumulated)
+            if seg_len < _MIN_SEG_DUR:
+                break
+            offset = max(0.0, (avail - seg_len) / 2.0)
+            s_in = round(sub["start"] + offset, 3)
+            s_out = round(s_in + seg_len, 3)
+            segments.append({
+                "clipFilename": top["filename"],
+                "sourceIn":     s_in,
+                "sourceOut":    s_out,
+                "_motion":      float(top.get("motion") or 0),
+                "_repeat":      True,
+            })
+            accumulated += seg_len
+
+    return segments
+
+
+def _snap_segments_to_beats(segments, beats, tolerance=_BEAT_TOLERANCE):
+    """Walk cumulative time across segments, snap each segment END to the
+    nearest beat within ±tolerance. Adjusts only sourceOut (and the next
+    segment's sourceIn implicitly via repositioning)."""
+    if not beats:
+        return segments
+    cum = 0.0
+    for seg in segments:
+        seg_dur = seg["sourceOut"] - seg["sourceIn"]
+        target_end = cum + seg_dur
+        nearest = min(beats, key=lambda b: abs(b - target_end))
+        if abs(nearest - target_end) <= tolerance:
+            new_dur = nearest - cum
+            if new_dur >= _MIN_SEG_DUR:
+                seg["sourceOut"] = round(seg["sourceIn"] + new_dur, 3)
+                seg_dur = new_dur
+        cum += seg_dur
+    return segments
+
+
+def _assign_transitions(segments, pacing):
+    """
+    Default transition between segments = crossfade 0.3s.
+    High-motion → low-motion = hard cut (preserves the impact).
+    Last segment = fade-to-black 0.8s if pacing=slow, else crossfade 0.3s.
+    """
+    n = len(segments)
+    for i, seg in enumerate(segments):
+        is_last = (i == n - 1)
+        if is_last:
+            if pacing == "slow":
+                seg["transition"] = {"type": "fade_to_black", "duration": 0.8}
+            else:
+                seg["transition"] = {"type": "crossfade", "duration": 0.3}
+        else:
+            cur = float(seg.get("_motion") or 0.0)
+            nxt = float(segments[i + 1].get("_motion") or 0.0)
+            if cur > 0.5 and nxt < 0.2:
+                seg["transition"] = {"type": "cut", "duration": 0.0}
+            else:
+                seg["transition"] = {"type": "crossfade", "duration": 0.3}
+    # Strip private fields
+    for seg in segments:
+        seg.pop("_motion", None)
+        seg.pop("_repeat", None)
+    return segments
+
+
+def _gen_overlay_slots(total_duration, pacing, segments):
+    """Three title slots: opening, mid (snapped to nearest cut), closing."""
+    opening_dur = 3.0 if pacing == "slow" else 1.8
+    closing_dur = 3.5 if pacing == "slow" else 2.0
+    mid_target  = total_duration * 0.42
+
+    # Cumulative cut points across the assembled segments
+    cuts = [0.0]
+    t = 0.0
+    for seg in segments:
+        t += seg["sourceOut"] - seg["sourceIn"]
+        cuts.append(t)
+
+    if cuts:
+        nearest = min(cuts, key=lambda c: abs(c - mid_target))
+        if abs(nearest - mid_target) < 1.5:
+            mid_target = nearest
+
+    return {
+        "opening_title": {"in": 0.0,
+                          "out": round(min(opening_dur, total_duration), 3)},
+        "mid_title":     {"in": round(mid_target, 3),
+                          "out": round(min(mid_target + 2.0, total_duration), 3)},
+        "closing_title": {"in": round(max(0.0, total_duration - closing_dur), 3),
+                          "out": round(total_duration, 3)},
+    }
+
+
+def _build_audio_plan(music_filename, pacing):
+    if not music_filename:
+        return {"musicFilename": None, "volume": 0.0, "fadeIn": 0.0, "fadeOut": 0.0}
+    return {
+        "musicFilename": music_filename,
+        "volume":        0.85,
+        "fadeIn":        1.0,
+        "fadeOut":       2.5 if pacing == "slow" else 1.5,
+    }
+
+
+@app.route("/api/auto-edit", methods=["POST"])
+def api_auto_edit():
+    """
+    POST EditRequest → return EditPlan.
+    All clip analyses are cached per project — repeat calls for the same
+    clipset are fast (only the planning step re-runs).
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    pid       = data.get("projectId") or "default"
+    duration  = float(data.get("duration") or 30)
+    aspect    = data.get("aspectRatio") or "16:9"
+    pacing    = data.get("pacing") or "balanced"
+    style_id  = data.get("styleId") or "cinematic"
+    music_fn  = data.get("musicFilename")
+    clip_fns  = data.get("clipFilenames") or []
+
+    if duration <= 0:
+        return jsonify({"error": "duration must be > 0"}), 400
+    if not clip_fns:
+        return jsonify({"error": "no clipFilenames provided"}), 400
+
+    # Parallel analysis (FFmpeg is IO/CPU-bound, GIL not an issue)
+    workers = min(4, max(1, len(clip_fns)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        analyses = list(ex.map(lambda fn: _analyze_or_cached(pid, fn), clip_fns))
+
+    failed = [a for a in analyses if a.get("error")]
+    ok     = [a for a in analyses if not a.get("error") and a.get("duration", 0) > 0]
+    if not ok:
+        return jsonify({
+            "error":  "no analysable clips",
+            "failed": failed,
+        }), 422
+
+    segments = _select_segments(ok, duration, pacing)
+    if not segments:
+        return jsonify({
+            "error":  "could not select any segment from the provided clips",
+            "failed": failed,
+            "ok":     [a["filename"] for a in ok],
+        }), 422
+
+    # Snap to beats if music provided and the project has cached beat anchors
+    beats = []
+    if music_fn:
+        with _doc_lock(pid):
+            doc = _read_doc(pid) or {}
+        # Beats live in audio.beat_anchors when the user has detected them in
+        # the editor — otherwise distribute cuts evenly (no snapping).
+        beats = list((doc.get("audio") or {}).get("beat_anchors") or [])
+
+    if beats:
+        segments = _snap_segments_to_beats(segments, beats)
+
+    segments = _assign_transitions(segments, pacing)
+    overlay_slots = _gen_overlay_slots(duration, pacing, segments)
+    audio_plan = _build_audio_plan(music_fn, pacing)
+
+    plan = {
+        "segments":     segments,
+        "overlaySlots": overlay_slots,
+        "audio":        audio_plan,
+        "meta": {
+            "totalDuration": duration,
+            "clipCount":     len(segments),
+            "pacing":        pacing,
+            "styleId":       style_id,
+            "aspectRatio":   aspect,
+            "generatedAt":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "analyzedClips": len(ok),
+            "failedClips":   [a["filename"] for a in failed],
+        },
+    }
+    return jsonify(plan)
 
 
 @app.route("/exports/<path:filename>")

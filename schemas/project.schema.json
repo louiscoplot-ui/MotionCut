@@ -175,6 +175,34 @@
     "ai": {
       "description": "Reserved for AI-generated metadata about this project (highlights, suggestions, captions).",
       "type": "object"
+    },
+
+    "ai_cache": {
+      "description": "Per-clip analysis cache, keyed by source filename. Populated by /api/clip/analyze. Read by /api/auto-edit. Safe to delete to force re-analysis.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "filename":     { "type": "string" },
+          "duration":     { "type": "number", "minimum": 0 },
+          "shot_score":   { "type": "number", "minimum": 0, "maximum": 1 },
+          "motion":       { "type": "number", "minimum": 0, "maximum": 1 },
+          "sharpness":    { "type": "number", "minimum": 0, "maximum": 1 },
+          "brightness":   { "type": "number", "minimum": 0, "maximum": 1 },
+          "audio_energy": { "type": "number", "minimum": 0, "maximum": 1 },
+          "scene_cuts":   { "type": "array", "items": { "type": "number" } },
+          "has_face":     { "type": "boolean" },
+          "shot_type":    { "type": "string" },
+          "analyzed_at":  { "type": "string" }
+        }
+      }
+    },
+
+    "edit_plan": {
+      "description": "Most recent EditPlan returned by /api/auto-edit. Stored so the editor can resume a magic edit (or re-apply it) without re-running analysis.",
+      "type": "object",
+      "additionalProperties": true
     }
   },
 

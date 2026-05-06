@@ -1866,9 +1866,270 @@ function snapTimeToBeat(t, tolerance = 0.25) {
   return bd <= tolerance ? best : t;
 }
 
-/** Generate a polished cinematic timeline from inputs.
- *  opts = { duration, aspect, style, pacing } */
-function generateMagicEdit(opts) {
+// ============================================================
+//  Magic Edit — backend-driven planner (push 5)
+//
+//  Flow:
+//    1. user opens modal, picks options, clicks "Generate"
+//    2. we list project clips, build EditRequest, POST /api/auto-edit
+//    3. backend analyses clips (FFmpeg) and returns an EditPlan
+//    4. we show a preview summary and Apply/Regenerate buttons
+//    5. on Apply → mutate state from the plan, save, draw
+// ============================================================
+
+/** Entry point bound to the modal's "Generate" button. */
+async function generateMagicEdit(opts) {
+  if (!state.video) { toast('Drop a video first'); return; }
+
+  // Cache the inputs so Regenerate can re-run with the same parameters
+  state._pendingOpts = opts;
+
+  // Move modal into the loading state
+  showMagicLoading('Listing project clips…');
+
+  // 1. Pull the project's video files from the existing project-files endpoint
+  let videoClipFilenames = [];
+  try {
+    const r = await fetch('/api/projects/' + encodeURIComponent(state.project) + '/files');
+    const data = await r.json();
+    videoClipFilenames = (data.files || [])
+      .filter(f => f.kind === 'video')
+      .map(f => f.name);
+  } catch (e) {
+    hideMagicLoading();
+    toast('Could not list project files: ' + e.message);
+    return;
+  }
+  if (!videoClipFilenames.length) {
+    hideMagicLoading();
+    toast('No video clips in this project. Drop some first.');
+    return;
+  }
+
+  // 2. Build the EditRequest (matches the backend's expected shape)
+  const editRequest = {
+    projectId:      state.project,
+    duration:       parseFloat(opts.duration) || 30,
+    aspectRatio:    opts.aspect,
+    pacing:         opts.pacing,
+    styleId:        opts.style,
+    musicFilename:  state.audio?.filename || null,
+    clipFilenames:  videoClipFilenames,
+  };
+
+  showMagicLoading(`Analyzing ${videoClipFilenames.length} clip${videoClipFilenames.length===1?'':'s'}…`);
+
+  // 3. Call the backend planner
+  let plan = null;
+  try {
+    const r = await fetch('/api/auto-edit', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(editRequest),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `auto-edit failed (${r.status})`);
+    plan = data;
+  } catch (e) {
+    hideMagicLoading();
+    toast('Auto-edit failed: ' + e.message);
+    return;
+  }
+
+  // 4. Move modal into the preview state
+  state._pendingPlan = plan;
+  showMagicPreview(plan, opts);
+}
+
+/** Render the EditPlan as a human-readable summary inside the modal. */
+function showMagicPreview(plan, opts) {
+  hideMagicLoading();
+  const el = $('magic-preview');
+  if (!el) return;
+
+  const segHTML = plan.segments.map((s, i) => {
+    const dur = (s.sourceOut - s.sourceIn).toFixed(2);
+    const trans = s.transition?.type || 'cut';
+    const display = (s.clipFilename || '').replace(/^[a-f0-9]+_/, '');
+    return `
+      <div class="magic-seg-row">
+        <span class="magic-seg-num mono">${String(i+1).padStart(2,'0')}</span>
+        <span class="magic-seg-name" title="${escapeHTML(display)}">${escapeHTML(display)}</span>
+        <span class="magic-seg-source mono">${s.sourceIn.toFixed(1)} → ${s.sourceOut.toFixed(1)}</span>
+        <span class="magic-seg-dur mono">${dur}s</span>
+        <span class="magic-seg-trans">${trans}</span>
+      </div>`;
+  }).join('');
+
+  const slots = plan.overlaySlots || {};
+  const slotLine = (lbl, s) => s
+    ? `<span class="magic-slot"><strong>${lbl}</strong> ${s.in.toFixed(1)}–${s.out.toFixed(1)}s</span>`
+    : '';
+
+  el.innerHTML = `
+    <div class="magic-preview-head">
+      <div class="magic-preview-title">Edit plan ready</div>
+      <div class="magic-preview-meta">
+        <strong>${plan.meta.totalDuration}s</strong> ·
+        ${plan.meta.clipCount} segments ·
+        ${plan.meta.pacing} pacing ·
+        ${plan.meta.aspectRatio}
+      </div>
+    </div>
+    <div class="magic-segs">${segHTML}</div>
+    <div class="magic-slots">
+      ${slotLine('Opening', slots.opening_title)}
+      ${slotLine('Mid',     slots.mid_title)}
+      ${slotLine('Closing', slots.closing_title)}
+    </div>
+    <div class="magic-audio">
+      <i data-lucide="music"></i>
+      ${plan.audio?.musicFilename
+        ? `<span>${escapeHTML(plan.audio.musicFilename.replace(/^[a-f0-9]+_/, ''))} · ${Math.round((plan.audio.volume||0)*100)}% · fade ${plan.audio.fadeIn}s in / ${plan.audio.fadeOut}s out</span>`
+        : '<span class="muted">no music</span>'}
+    </div>
+    ${plan.meta.failedClips?.length
+      ? `<div class="magic-failed muted small"><i data-lucide="alert-triangle"></i> ${plan.meta.failedClips.length} clip(s) failed analysis: ${plan.meta.failedClips.map(escapeHTML).join(', ')}</div>`
+      : ''}
+  `;
+  el.classList.remove('hidden');
+  $('magic-summary').classList.add('hidden');
+  $('magic-go').classList.add('hidden');
+  $('magic-apply').classList.remove('hidden');
+  $('magic-regen').classList.remove('hidden');
+  refreshIcons();
+}
+
+function showMagicLoading(text) {
+  const wrap = $('magic-loading');
+  if (!wrap) return;
+  $('magic-loading-text').textContent = text || 'Working…';
+  wrap.classList.remove('hidden');
+  $('magic-summary')?.classList.add('hidden');
+  $('magic-preview')?.classList.add('hidden');
+  $('magic-go').classList.add('hidden');
+  $('magic-apply').classList.add('hidden');
+  $('magic-regen').classList.add('hidden');
+}
+
+function hideMagicLoading() {
+  $('magic-loading')?.classList.add('hidden');
+}
+
+function resetMagicModal() {
+  hideMagicLoading();
+  $('magic-preview')?.classList.add('hidden');
+  $('magic-summary')?.classList.remove('hidden');
+  $('magic-go').classList.remove('hidden');
+  $('magic-apply').classList.add('hidden');
+  $('magic-regen').classList.add('hidden');
+}
+
+/** Apply an EditPlan to the editor state. state.video stays singular for now;
+ *  the full plan is preserved on state.editPlan for future multi-clip work. */
+async function applyMagicPlan() {
+  const plan = state._pendingPlan;
+  const opts = state._pendingOpts;
+  if (!plan || !opts) return;
+
+  const styleId = opts.style || 'cinematic';
+  const style   = MAGIC_STYLES[styleId] || MAGIC_STYLES.cinematic;
+
+  // 1. Style the project (aspect + grade + vignette + grain + letterbox)
+  setAspect(opts.aspect);
+  state.fx.grade    = style.grade;
+  state.fx.vignette = style.vignette;
+  state.fx.grain    = style.grain;
+  state.letterbox   = style.letterbox;
+  syncStyleControls();
+
+  // 2. Apply the FIRST segment to the active video (singular slot for now).
+  //    The full multi-clip plan is parked on state.editPlan for the
+  //    upcoming multi-clip timeline work.
+  if (plan.segments?.[0]) {
+    const seg = plan.segments[0];
+    state.inMark  = seg.sourceIn;
+    state.outMark = seg.sourceOut;
+  } else {
+    state.inMark = state.outMark = null;
+  }
+  state.editPlan = plan;
+
+  // 3. Replace overlay layers with title cards anchored to plan.overlaySlots
+  state.layers = [];
+  state.selectedIds.clear();
+  state.selectedId = null;
+
+  const slots = plan.overlaySlots || {};
+  const titleSpecs = [
+    { slot: slots.opening_title, text: brandSub(style.titleA),
+      font: style.titleFont, size: style.titleSize,
+      anim: style.titleAnim, exit: style.titleExit, color: '#ffffff' },
+    { slot: slots.mid_title,     text: brandSub(style.titleB),
+      font: style.subFont,   size: style.subSize,
+      anim: style.subAnim,   exit: style.subExit,
+      color: brandSub(style.accent) },
+    { slot: slots.closing_title, text: brandSub(style.titleC),
+      font: style.titleFont, size: Math.round(style.titleSize * 0.7),
+      anim: style.titleAnim, exit: style.titleExit, color: '#ffffff' },
+  ];
+  for (const spec of titleSpecs) {
+    if (!spec.text || !spec.slot) continue;
+    state.layers.push(makeTextLayer({
+      text: spec.text, fontFamily: spec.font, fontSize: spec.size,
+      x: canvasW / 2, y: canvasH * 0.5, color: spec.color,
+      animation: spec.anim, exit: spec.exit,
+      start: spec.slot.in, end: spec.slot.out,
+    }));
+  }
+
+  // 4. Inject brand logo if available (top-left, throughout)
+  if (state.brand?.logoUrl) {
+    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = state.brand.logoUrl;
+    const w = Math.min(220, canvasW * 0.10);
+    const logo = makeLogoLayer({
+      src: state.brand.logoFile || 'brand_logo',
+      url: state.brand.logoUrl, img,
+      x: canvasW * 0.04, y: canvasH * 0.04,
+      width: w, height: w,
+      opacity: 0.92, _brandLogo: true,
+      start: 0, end: state.outMark || 9999,
+    });
+    img.onload = () => { logo.height = w / (img.naturalWidth / img.naturalHeight); draw(); };
+    state.layers.unshift(logo);
+  }
+
+  state.template = 'magic_' + styleId;
+  state.selectedId = state.layers[0]?.id || null;
+  renderLayersPanel(); renderInspector(); positionFloatingToolbar();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  draw(); snapshot();
+
+  // 5. Persist immediately so the user can reload and resume
+  try { await window.MC.project.save(state); }
+  catch (e) { console.warn('[magic] save after apply failed', e); }
+
+  // 6. Close modal
+  $('magic-backdrop').classList.remove('show');
+  resetMagicModal();
+  state._pendingPlan = null;
+  toast(`Auto-edit applied · ${plan.segments.length} segments`, { gold: true });
+}
+
+async function regenerateMagicPlan() {
+  const opts = state._pendingOpts;
+  if (!opts) return;
+  state._pendingPlan = null;
+  resetMagicModal();
+  await generateMagicEdit(opts);
+}
+
+// ----------------------------------------------------------------
+// Legacy single-clip planner — kept as a fallback if the backend
+// is unreachable. Same shape as the old generateMagicEdit so existing
+// callers (e.g. unit tests) keep working.
+// ----------------------------------------------------------------
+function generateMagicEditLocal(opts) {
   if (!state.video) { toast('Drop a video first'); return; }
   const dur     = parseFloat(opts.duration) || 30;
   const aspect  = opts.aspect || '16:9';
@@ -1991,11 +2252,17 @@ function bindMagicEdit() {
   };
   const close = () => backdrop.classList.remove('show');
 
-  $('btn-magic')?.addEventListener('click', open);
-  $('magic-cancel')?.addEventListener('click', close);
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  $('btn-magic')?.addEventListener('click', () => { resetMagicModal(); open(); });
+  $('magic-cancel')?.addEventListener('click', () => { resetMagicModal(); close(); state._pendingPlan = null; });
+  $('magic-apply')?.addEventListener('click', applyMagicPlan);
+  $('magic-regen')?.addEventListener('click', regenerateMagicPlan);
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) { resetMagicModal(); close(); state._pendingPlan = null; }
+  });
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && backdrop.classList.contains('show')) { e.preventDefault(); close(); }
+    if (e.key === 'Escape' && backdrop.classList.contains('show')) {
+      e.preventDefault(); resetMagicModal(); close(); state._pendingPlan = null;
+    }
   });
 
   // Chip groups behave like radio buttons
