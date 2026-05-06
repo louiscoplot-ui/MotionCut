@@ -126,6 +126,8 @@ const STRINGS = {
 
     // Projects
     'project.new':           'New project',
+    'project.save_as':       'Save current as…',
+    'project.save_prompt':   'Save current work as a project. Name?',
     'project.untitled':      'Untitled project',
     'project.prompt':        'Project name?',
     'project.confirm_delete':'Delete this project and all its files?',
@@ -242,6 +244,8 @@ const STRINGS = {
     'toast.export_done':     'Export terminé',
 
     'project.new':           'Nouveau projet',
+    'project.save_as':       'Enregistrer comme…',
+    'project.save_prompt':   'Enregistrer le travail courant comme projet. Nom ?',
     'project.untitled':      'Projet sans titre',
     'project.prompt':        'Nom du projet ?',
     'project.confirm_delete':'Supprimer ce projet et tous ses fichiers ?',

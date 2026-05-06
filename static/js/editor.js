@@ -261,15 +261,24 @@ function inferKind(file) {
 async function handleFile(file, kindHint) {
   const kind = kindHint || inferKind(file);
   if (!kind) { toast(`Unsupported file: ${file.name}`); return; }
+  const wasVideo = !!state.video;
   try {
     toast(`Uploading ${file.name}…`, { ms: 60000, gold: true });
     const meta = await uploadFile(file, kind, pct => {
       toast(`Uploading ${file.name} — ${pct.toFixed(0)}%`, { ms: 60000, gold: true });
     });
-    toast(`Loaded ${file.name}`);
-    if (kind === 'video')  applyVideo(meta);
-    if (kind === 'image')  applyLogo(meta);
-    if (kind === 'audio')  applyMusic(meta);
+    if (kind === 'video') {
+      applyVideo(meta);
+      toast(wasVideo ? `Now editing ${meta.filename.replace(/^[a-f0-9]+_/,'')}` : `Loaded ${file.name}`, { gold:true });
+    } else if (kind === 'image') {
+      applyLogo(meta);
+      toast(`Logo added: ${file.name}`);
+    } else if (kind === 'audio') {
+      applyMusic(meta);
+      toast(`Music: ${file.name}`);
+    }
+    // Refresh the project library so newly uploaded files appear in it
+    refreshLibrary();
   } catch (e) {
     toast(`Error: ${e.message}`);
   }
@@ -433,10 +442,13 @@ function bindDropzone(zoneId, inputId, kind) {
   zone.addEventListener('drop', async e => {
     e.preventDefault(); e.stopPropagation();
     zone.classList.remove('over');
-    if (e.dataTransfer.files[0]) await handleFile(e.dataTransfer.files[0], kind);
+    const files = [...(e.dataTransfer?.files || [])];
+    for (const f of files) await handleFile(f, kind);   // ALL files, not just [0]
   });
   input.addEventListener('change', async () => {
-    if (input.files[0]) await handleFile(input.files[0], kind);
+    const files = [...(input.files || [])];
+    for (const f of files) await handleFile(f, kind);
+    input.value = '';   // allow re-selecting the same file later
   });
 }
 
@@ -1632,6 +1644,24 @@ function bindProjectPicker() {
     await fetchProjects();
     setProject(proj.id);
     toast(t('toast.project_created', { n: proj.name }), { gold: true });
+    await refreshProjectMenu();
+    menu.classList.add('hidden');
+  });
+  $('btn-rename-project').addEventListener('click', async () => {
+    const t = window.MC?.i18n?.t || ((k)=>k);
+    const cur = state.projects.find(p => p.id === state.project);
+    const name = prompt(t('project.save_prompt'), cur?.name === 'default' ? '' : (cur?.name || ''));
+    if (!name) return;
+    const r = await fetch('/api/projects/' + encodeURIComponent(state.project) + '/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(`Error: ${d.error || r.status}`); return; }
+    await fetchProjects();
+    setProject(d.id);
+    toast(t('toast.project_created', { n: d.name }), { gold: true });
     await refreshProjectMenu();
     menu.classList.add('hidden');
   });

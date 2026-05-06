@@ -465,6 +465,42 @@ def api_projects_delete(pid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/projects/<pid>/rename", methods=["POST"])
+def api_projects_rename(pid):
+    """
+    Rename / save a project. If pid is 'default', this CLONES the default
+    folder into a new named folder (so 'Default' stays as a fresh workspace
+    and the user's work is preserved under the chosen name). Otherwise this
+    moves the existing folder to a new name.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    raw_name = (data.get("name") or "").strip()
+    if not raw_name:
+        return jsonify({"error": "name required"}), 400
+    slug = re.sub(r"[^A-Za-z0-9_\-]", "_", raw_name).lower()[:40] or "project"
+    new_pid = time.strftime("%Y%m%d%H%M%S") + "_" + slug
+    src_dir = project_dir(pid)
+    dst_dir = UPLOAD_DIR / new_pid
+    if dst_dir.exists():
+        return jsonify({"error": "destination exists"}), 409
+
+    try:
+        if pid == "default":
+            # Copy then leave the default empty for next session
+            shutil.copytree(str(src_dir), str(dst_dir))
+            # Move (don't delete) — empty default by removing files
+            for f in list(src_dir.iterdir()):
+                if f.is_file():
+                    try: f.unlink()
+                    except Exception: pass
+        else:
+            shutil.move(str(src_dir), str(dst_dir))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "id": new_pid, "name": raw_name})
+
+
 @app.route("/exports/<path:filename>")
 def serve_export(filename):
     return send_from_directory(str(EXPORT_DIR), filename, conditional=True, as_attachment=True)
