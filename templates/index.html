@@ -124,11 +124,24 @@
       <div id="timeline-ticks" class="timeline-ticks"></div>
     </div>
 
-    <div id="layer-list" class="layer-list"></div>
   </section>
 
   <!-- ============================ RIGHT SIDEBAR =========================== -->
   <aside class="sidebar right">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Layers</h2>
+        <div class="layer-actions">
+          <button id="btn-layer-dup"   class="icon-btn" title="Duplicate">⧉</button>
+          <button id="btn-layer-up"    class="icon-btn" title="Bring forward">▲</button>
+          <button id="btn-layer-down"  class="icon-btn" title="Send backward">▼</button>
+        </div>
+      </div>
+      <div id="layers-panel" class="layers-panel">
+        <div class="layers-empty muted small">No layers yet.<br>Add one from the left.</div>
+      </div>
+    </section>
+
     <section class="panel">
       <h2>Templates</h2>
       <div class="templates">

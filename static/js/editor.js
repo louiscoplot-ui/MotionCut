@@ -102,10 +102,22 @@ window.addEventListener('resize', () => { resizeCanvas(); draw(); });
 // ============================================================
 //  Layer factories
 // ============================================================
+let _layerCounter = { text: 0, logo: 0, color: 0 };
+function nextName(type) {
+  _layerCounter[type] = (_layerCounter[type] || 0) + 1;
+  const labels = { text: 'Text', logo: 'Logo', color: 'Overlay' };
+  return `${labels[type]} ${_layerCounter[type]}`;
+}
+
 function makeTextLayer(opts={}) {
   return Object.assign({
     id: uid(),
     type: 'text',
+    name: nextName('text'),
+    visible: true,
+    locked: false,
+    opacity: 1,
+    blendMode: 'source-over',
     text: 'Your Headline',
     x: canvasW * 0.5,
     y: canvasH * 0.5,
@@ -126,6 +138,10 @@ function makeLogoLayer(opts={}) {
   return Object.assign({
     id: uid(),
     type: 'logo',
+    name: nextName('logo'),
+    visible: true,
+    locked: false,
+    blendMode: 'source-over',
     src: null,
     url: null,
     img: null,
@@ -140,6 +156,10 @@ function makeColorLayer(opts={}) {
   return Object.assign({
     id: uid(),
     type: 'color',
+    name: nextName('color'),
+    visible: true,
+    locked: false,
+    blendMode: 'source-over',
     color: '#000000',
     opacity: 0.35,
     x: 0, y: 0, width: canvasW, height: canvasH,

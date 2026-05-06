@@ -581,43 +581,159 @@ button.primary:hover::after { left: 130%; }
 }
 
 /* ============================================================
-   LAYER LIST
+   LAYERS PANEL (Photoshop-style)
    ============================================================ */
-.layer-list {
-  display: flex; gap: 8px;
-  margin-top: 12px;
-  overflow-x: auto;
-  padding: 4px 2px;
-  min-height: 36px;
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
 }
-.layer-chip {
-  background: rgba(255,255,255,0.025);
+.panel-head h2 { margin-bottom: 0; }
+.layer-actions { display: flex; gap: 4px; }
+.icon-btn {
+  width: 28px; height: 28px;
+  padding: 0;
+  font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.03);
   border: 1px solid var(--line-2);
-  padding: 7px 12px;
-  border-radius: var(--radius-sm);
-  font-size: 11.5px;
-  cursor: pointer;
-  white-space: nowrap;
-  display: flex; align-items: center; gap: 8px;
-  transition: all 160ms var(--ease);
-  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-radius: var(--radius-xs);
 }
-.layer-chip:hover {
+.icon-btn:hover {
+  color: var(--gold-2);
   border-color: rgba(240,192,64,0.4);
   background: rgba(240,192,64,0.05);
+  transform: none;
 }
-.layer-chip.active {
-  border-color: var(--gold);
+
+.layers-panel {
+  display: flex; flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.layers-empty {
+  text-align: center;
+  padding: 22px 8px;
+  letter-spacing: 0.06em;
+  background: rgba(0,0,0,0.2);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+}
+
+.layer-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 8px;
+  background: rgba(255,255,255,0.018);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  transition: background 140ms var(--ease), border-color 140ms var(--ease);
+  position: relative;
+  user-select: none;
+}
+.layer-row:hover {
+  background: rgba(255,255,255,0.04);
+  border-color: var(--line-2);
+}
+.layer-row.active {
+  background: rgba(240,192,64,0.10);
+  border-color: rgba(240,192,64,0.55);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+.layer-row.dragging  { opacity: 0.4; cursor: grabbing; }
+.layer-row.drop-above { box-shadow: inset 0 2px 0 var(--gold-2); }
+.layer-row.drop-below { box-shadow: inset 0 -2px 0 var(--gold-2); }
+.layer-row.hidden     { opacity: 0.45; }
+
+.layer-row .grip {
+  color: var(--muted-2);
+  font-size: 12px;
+  cursor: grab;
+  flex-shrink: 0;
+}
+.layer-row .layer-eye,
+.layer-row .layer-lock {
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 0;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.layer-row .layer-eye:hover,
+.layer-row .layer-lock:hover {
   color: var(--gold-2);
-  background: rgba(240,192,64,0.1);
-  box-shadow: 0 0 0 1px rgba(240,192,64,0.3);
+  background: rgba(240,192,64,0.08);
+  transform: none;
 }
-.layer-chip .dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--gold);
-  box-shadow: 0 0 6px var(--gold-glow);
+.layer-row .layer-eye.off { color: var(--muted-2); }
+.layer-row .layer-lock.on { color: var(--gold-2); }
+
+.layer-row .layer-type {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: rgba(240,192,64,0.12);
+  color: var(--gold-2);
+  border-radius: 4px;
+  flex-shrink: 0;
 }
+.layer-row .layer-type.t-logo  { background: rgba(120,180,255,0.12); color: #9ec5ff; }
+.layer-row .layer-type.t-color { background: rgba(255,160,200,0.12); color: #ffa3c7; }
+
+.layer-row .layer-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 4px;
+  min-width: 0;
+}
+.layer-row .layer-name.editing {
+  background: rgba(0,0,0,0.5);
+  border-color: var(--gold);
+  outline: none;
+  color: var(--gold-2);
+}
+
+.layer-row .layer-del {
+  width: 22px; height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 14px;
+  border-radius: 4px;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0;
+  transition: opacity 140ms var(--ease), color 140ms var(--ease), background 140ms var(--ease);
+}
+.layer-row:hover .layer-del,
+.layer-row.active .layer-del { opacity: 1; }
+.layer-row .layer-del:hover {
+  color: var(--danger);
+  background: rgba(239,68,68,0.12);
+  transform: none;
+}
+
+/* ============================================================
+   CANVAS SNAP GUIDES
+   ============================================================ */
+/* (drawn directly on canvas — these styles only theme the cursor) */
+#canvas.snapping { cursor: move; }
 
 /* ============================================================
    TEMPLATES (with gradient previews)
