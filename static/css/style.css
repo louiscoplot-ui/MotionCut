@@ -1673,6 +1673,18 @@ html[data-theme="light"] .topbar-divider { background: var(--line-2); }
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+.lib-del {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--tx-4);
+  border-radius: var(--r-1);
+  opacity: 0;
+  transition: opacity var(--d-2) var(--ease-quart), color var(--d-2) var(--ease-quart), background var(--d-2) var(--ease-quart);
+  flex-shrink: 0;
+}
+.lib-item:hover .lib-del { opacity: 1; }
+.lib-del:hover { color: var(--danger); background: rgba(239,70,85,0.10); }
+.lib-del [data-lucide] { width: 12px; height: 12px; color: inherit; }
 
 /* Cmd+K trigger pill */
 html[data-theme="light"] .cmdk-trigger {

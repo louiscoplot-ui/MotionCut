@@ -1606,11 +1606,13 @@ async function refreshLibrary() {
         <i data-lucide="${icon}"></i>
         <span class="lib-name">${escapeHTML(display)}</span>
         <span class="lib-kind">${escapeHTML(t('library.' + f.kind))}</span>
+        <button class="lib-del" data-del="${escapeHTML(f.name)}" title="${escapeHTML(t('library.delete'))}"><i data-lucide="x"></i></button>
       </div>`;
   }).join('');
   refreshIcons();
   lib.querySelectorAll('.lib-item').forEach(it => {
-    it.addEventListener('click', () => {
+    it.addEventListener('click', (e) => {
+      if (e.target.closest('.lib-del')) return;     // X click handled separately
       const meta = {
         filename: it.dataset.name,
         url: it.dataset.url,
@@ -1620,6 +1622,47 @@ async function refreshLibrary() {
       if (meta.kind === 'video') applyVideo(meta);
       else if (meta.kind === 'image') applyLogo(meta);
       else if (meta.kind === 'audio') applyMusic(meta);
+    });
+  });
+  lib.querySelectorAll('.lib-del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const name = btn.dataset.del;
+      const tt = window.MC?.i18n?.t || ((k)=>k);
+      if (!confirm(tt('library.confirm_delete'))) return;
+      try {
+        const r = await fetch('/api/projects/' + encodeURIComponent(state.project) + '/files/' + encodeURIComponent(name), { method: 'DELETE' });
+        if (!r.ok) {
+          const d = await r.json().catch(()=>({}));
+          toast('Error: ' + (d.error || r.status));
+          return;
+        }
+        // If the deleted file was currently in use, reset the editor reference
+        if (state.video?.filename === name) {
+          state.video = null;
+          if (video) { video.removeAttribute('src'); video.load(); }
+          stageEmpty?.classList.remove('hidden');
+          $('dropzone-video').classList.remove('has-file');
+          $('dropzone-video').querySelector('.dz-title').textContent = tt('dz.video.title');
+        }
+        if (state.audio?.filename === name) {
+          state.audio = null;
+          $('dropzone-audio').classList.remove('has-file');
+          $('dropzone-audio').querySelector('.dz-title').textContent = tt('dz.audio.title');
+          const mi = $('music-info');
+          mi.classList.remove('has-file');
+          mi.querySelector('span').textContent = tt('style.music.none');
+          mi.querySelector('span').classList.add('muted');
+        }
+        // If a logo layer used this file, drop it
+        const before = state.layers.length;
+        state.layers = state.layers.filter(l => !(l.type === 'logo' && l.src === name));
+        if (state.layers.length !== before) { renderLayersPanel(); draw(); }
+        toast(tt('toast.file_deleted'));
+        refreshLibrary();
+      } catch (err) {
+        toast('Error: ' + err.message);
+      }
     });
   });
 }

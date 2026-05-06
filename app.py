@@ -453,6 +453,20 @@ def api_project_files(pid):
     return jsonify({"files": out})
 
 
+@app.route("/api/projects/<pid>/files/<path:filename>", methods=["DELETE"])
+def api_project_file_delete(pid, filename):
+    d = project_dir(pid)
+    safe = safe_name(filename)
+    target = d / safe
+    if not target.exists() or not target.is_file():
+        return jsonify({"error": "file not found"}), 404
+    try:
+        target.unlink()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/projects/<pid>", methods=["DELETE"])
 def api_projects_delete(pid):
     d = project_dir(pid)
