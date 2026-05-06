@@ -1504,7 +1504,11 @@ def build_filter_complex(payload, target_w, target_h, duration,
             f"drawtext=text='{text_expr}':"
             f"fontcolor={color_hex}:"
             f"fontsize={size}:"
-            f"x={x_expr}:y={y_expr}:"
+            # x/y must be single-quoted: animation expressions like
+            # max(0,1-...) contain commas that the filter parser would
+            # otherwise interpret as a filter separator. Same trick as alpha
+            # and enable below.
+            f"x='{x_expr}':y='{y_expr}':"
             f"alpha='{alpha_expr}':"
             f"borderw=2:bordercolor=black@0.6:"
             f"enable='between(t,{start},{end})'"
