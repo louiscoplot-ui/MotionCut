@@ -190,6 +190,17 @@ function snapshot() {
   history.stack.push(pruned);
   if (history.stack.length > history.max) history.stack.shift();
   history.idx = history.stack.length - 1;
+
+  // Debounced auto-save to server (v1 project document).
+  // Silent — no toast. Explicit Save button still confirms with a toast.
+  // Skipped if project-state module hasn't loaded yet (e.g. early init).
+  if (window.MC?.project?.save) {
+    clearTimeout(state._autoSaveTimer);
+    state._autoSaveTimer = setTimeout(() => {
+      window.MC.project.save(state)
+        .catch(err => console.warn('[editor] auto-save failed:', err));
+    }, 3000);
+  }
 }
 function restore(json) {
   try {
@@ -2433,7 +2444,13 @@ function pollExport(jobId) {
 // ============================================================
 //  Project save/load
 // ============================================================
-function saveProject() {
+/**
+ * Legacy export — DOWNLOADS a JSON blob to disk. Format is the pre-v1
+ * ad-hoc shape (version: 2). Kept around for offline export / manual
+ * project sharing. For SERVER persistence use MC.project.save() instead,
+ * which writes the schema-validated v1 document into the project folder.
+ */
+function exportProjectBlob() {
   const data = {
     version: 2,
     video: state.video, audio: state.audio,
@@ -2447,7 +2464,68 @@ function saveProject() {
   a.href = url; a.download = 'motioncut_project.json';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('Project saved');
+  toast('Project file downloaded');
+}
+
+/** Persist the project to the server via the v1 document API. */
+async function saveProjectToServer() {
+  try {
+    await window.MC.project.save(state);
+    toast('Project saved', { gold: true });
+  } catch (e) {
+    toast('Save failed: ' + e.message);
+    console.error('[editor] save failed', e);
+  }
+}
+
+/**
+ * Restore the editor's runtime state from a v1 project document.
+ * Used on page reload to resume where the user left off.
+ *
+ * Note on round-trip: deserialize gives us editor-shape fields. We merge
+ * them into the live state object so existing references (in canvas
+ * draw, inspector, timeline) stay valid.
+ */
+function restoreFromDocument(doc) {
+  if (!doc || !window.MC?.project?.deserialize) return;
+  const restored = window.MC.project.deserialize(doc, state.project);
+  // Merge top-level fields. We don't replace the state object reference
+  // (lots of closures hold it) — we mutate it in place.
+  Object.assign(state, {
+    _projectId:  restored._projectId,
+    _created_at: restored._created_at,
+    template:    restored.template,
+    aspect:      restored.aspect,
+    inMark:      restored.inMark,
+    outMark:     restored.outMark,
+    fx:          restored.fx,
+    letterbox:   restored.letterbox,
+    music:       restored.music,
+    beats:       restored.beats || [],
+    brand:       Object.assign({}, state.brand, restored.brand || {}),
+    layers:      restored.layers || [],
+  });
+  // Video: only swap if the doc references one. Don't clobber an active
+  // upload that hasn't yet been saved.
+  if (restored.video?.filename) {
+    const url = '/projects/' + encodeURIComponent(state.project)
+              + '/files/'    + encodeURIComponent(restored.video.filename);
+    state.video = Object.assign({}, restored.video, { url });
+    if (video) { video.src = url; video.load(); }
+    if (stageEmpty) stageEmpty.classList.add('hidden');
+  }
+  if (restored.audio?.filename) {
+    const url = '/projects/' + encodeURIComponent(state.project)
+              + '/files/'    + encodeURIComponent(restored.audio.filename);
+    state.audio = Object.assign({}, restored.audio, { url });
+  }
+
+  setAspect(state.aspect);
+  syncStyleControls();
+  renderLayersPanel(); renderInspector();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  draw();
+  toast('Project restored', { gold: true });
 }
 function loadProjectFile(file) {
   const reader = new FileReader();
@@ -2501,7 +2579,8 @@ const CMDS = [
   { id:'fx-grain',   label:'Toggle film grain',  cat:'FX',    icon:'sparkle', run:()=>{ state.fx.grain = !state.fx.grain; syncStyleControls(); draw(); } },
   { id:'undo',       label:'Undo',               cat:'Edit',  icon:'undo-2', run:undo },
   { id:'redo',       label:'Redo',               cat:'Edit',  icon:'redo-2', run:redo },
-  { id:'save',       label:'Save project',       cat:'File',  icon:'save', run:saveProject },
+  { id:'save',         label:'Save project',         cat:'File', icon:'save',     run:saveProjectToServer },
+  { id:'export-blob',  label:'Download project as file', cat:'File', icon:'download', run:exportProjectBlob },
   { id:'play',       label:'Play / Pause',       cat:'Playback',icon:'play', run:togglePlay },
   { id:'mark-in',    label:'Set in mark (I)',    cat:'Trim', icon:'log-in',   run:setInMark },
   { id:'mark-out',   label:'Set out mark (O)',   cat:'Trim', icon:'log-out',  run:setOutMark },
@@ -3012,13 +3091,19 @@ function init() {
   // Projects: load list, set current from localStorage, populate library
   state.project = localStorage.getItem('mc-project') || 'default';
   bindProjectPicker();
-  fetchProjects().then(() => {
+  fetchProjects().then(async () => {
     const proj = state.projects.find(p => p.id === state.project);
     if (!proj) state.project = 'default';
     const display = state.projects.find(p => p.id === state.project);
     $('project-name').textContent = display?.name || 'Default';
     refreshLibrary();
     loadBrandKit();
+    // Auto-restore the persisted project document if it exists. Lets the
+    // user reload the tab and resume exactly where they left off.
+    try {
+      const doc = await window.MC?.project?.load?.(state.project);
+      if (doc) restoreFromDocument(doc);
+    } catch (e) { console.warn('[editor] project doc load failed', e); }
   });
   bindBrandKit();
 
@@ -3059,7 +3144,7 @@ function init() {
   // Undo/redo/save/load
   $('btn-undo').addEventListener('click', undo);
   $('btn-redo').addEventListener('click', redo);
-  $('btn-save-project').addEventListener('click', saveProject);
+  $('btn-save-project').addEventListener('click', saveProjectToServer);
   $('load-project').addEventListener('change', e => { if (e.target.files[0]) loadProjectFile(e.target.files[0]); });
 
   // Export

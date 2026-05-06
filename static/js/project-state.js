@@ -200,6 +200,19 @@ const SCHEMA_VERSION = 1;
 
 const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
 
+// Valid style_id values — mirrors schemas/project.schema.json. Update both
+// when adding a new template. Matches every value editor.js writes to
+// state.template (legacy + Magic Edit variants).
+const KNOWN_STYLE_IDS = [
+  'custom',
+  'cinematic', 'real_estate', 'travel', 'social', 'corporate',
+  're_drone_reveal', 're_property_tour', 're_listing_card', 're_agent_intro',
+  'social_hook_reveal', 'social_listicle',
+  'cinematic_three_act', 'kinetic_word_pop',
+  'magic_cinematic', 'magic_luxury_re', 'magic_social_reel', 'magic_editorial',
+  'magic_modern_luxury', 'magic_moody', 'magic_energetic', 'magic_corporate',
+];
+
 function pushErr(errors, path, msg) { errors.push(`${path}: ${msg}`); }
 
 function checkType(v, types, errors, path) {
@@ -283,6 +296,7 @@ function validate(doc) {
     const ep = doc.edit_params;
     if (ep.aspect_ratio != null) checkEnum(ep.aspect_ratio, ['16:9','9:16','1:1'], errors, 'edit_params.aspect_ratio');
     if (ep.pacing != null)       checkEnum(ep.pacing,       ['slow','balanced','fast'], errors, 'edit_params.pacing');
+    if (ep.style_id != null)     checkEnum(ep.style_id, KNOWN_STYLE_IDS, errors, 'edit_params.style_id');
   }
   if (Array.isArray(doc.clips))    doc.clips.forEach((c, i) => validateClip(c, `clips[${i}]`, errors));
   if (Array.isArray(doc.segments)) doc.segments.forEach((s, i) => validateSegment(s, `segments[${i}]`, errors));
@@ -321,16 +335,42 @@ const isoNow = () => new Date().toISOString();
 //   produces a v1 project document. Idempotent.
 // ============================================================
 
+/**
+ * Ensure the runtime state has stable identifiers for the project, video,
+ * audio. Mutates state (intentionally — this is a setup function, not a
+ * serializer). Call this BEFORE serialize() if you want stable round-trips.
+ *
+ * Default doc.id resolution order:
+ *   1. state._projectId (already set this session)
+ *   2. state.project    (the project folder name — canonical)
+ *   3. 'default'
+ *
+ * After this call, serialize() is pure: it only reads from state.
+ */
+function ensureProjectId(state) {
+  if (!state._projectId) {
+    state._projectId = state.project || 'default';
+  }
+  if (state.video && !state.video._docId)  state.video._docId  = newClipId();
+  if (state.audio && !state.audio._docId)  state.audio._docId  = newClipId();
+  return state._projectId;
+}
+
 function serialize(state, opts = {}) {
   const now = isoNow();
-  const projId = opts.projectId || state._projectId || newProjId();
+  // Pure read: never mints new ids here. Caller must ensureProjectId() first
+  // if they want stable ones — otherwise a transient default is used.
+  const projId = opts.projectId
+              || state._projectId
+              || state.project
+              || 'default';
   const name = opts.name || state.brand?.agencyName || (state.template ? `${state.template} project` : 'Untitled project');
 
   /** @type {ClipMeta[]} */
   const clips = [];
   if (state.video) {
     clips.push({
-      id:           state.video._docId || (state.video._docId = newClipId()),
+      id:           state.video._docId || ('clip_' + (state.video.filename || 'video').replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || 'unknown'),
       path:         state.video.filename,
       kind:         'video',
       duration:     state.video.duration || 0,
@@ -341,7 +381,7 @@ function serialize(state, opts = {}) {
   }
   if (state.audio) {
     clips.push({
-      id:       state.audio._docId || (state.audio._docId = newClipId()),
+      id:       state.audio._docId || ('clip_' + (state.audio.filename || 'audio').replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || 'unknown'),
       path:     state.audio.filename,
       kind:     'audio',
       duration: state.audio.duration || 0,
@@ -479,13 +519,23 @@ function layerToDoc(l) {
 //   responsible for merging it into the live state.
 // ============================================================
 
-function deserialize(doc) {
+/**
+ * Rebuild a runtime editor state from a project document.
+ *
+ * @param {ProjectDocument} doc
+ * @param {string} [projectId]  The project folder name. Used to rebuild
+ *                              logo image URLs (the doc only stores the
+ *                              filename; the actual URL needs the folder
+ *                              context). Defaults to doc.id.
+ */
+function deserialize(doc, projectId) {
   const v = validate(doc);
   if (!v.valid) {
     console.warn('[project-state] deserialize: validation issues', v.errors);
     // Continue best-effort. Strict callers should call validate() first.
   }
-  const layers = (doc.layers || []).map(docToLayer);
+  const pid = projectId || doc.id || 'default';
+  const layers = (doc.layers || []).map(L => docToLayer(L, pid));
   return {
     _projectId:  doc.id,
     _created_at: doc.created_at,
@@ -527,7 +577,7 @@ function deserialize(doc) {
   };
 }
 
-function docToLayer(L) {
+function docToLayer(L, projectId) {
   const out = {
     id:        L.id,
     type:      L.type,
@@ -560,9 +610,25 @@ function docToLayer(L) {
     out.color      = L.content?.color        ?? '#ffffff';
     out.align      = L.content?.align        ?? 'center';
   } else if (L.type === 'logo') {
+    // Rebuild the runtime image so the canvas can draw it.
+    // The doc stores only the filename; the URL is derived from the project's
+    // file-serving route (/projects/<pid>/files/<filename>).
     out.src = L.content?.src || null;
-    out.url = null;
-    out.img = null;
+    if (out.src && projectId) {
+      const url = '/projects/' + encodeURIComponent(projectId)
+                + '/files/'   + encodeURIComponent(out.src);
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = url;
+      // Trigger a redraw once the bytes land — the editor's loop already
+      // re-paints continuously, so this is mostly defensive.
+      img.onload = () => { try { window.MC?.editor?.draw?.(); } catch {} };
+      out.url = url;
+      out.img = img;
+    } else {
+      out.url = null;
+      out.img = null;
+    }
   } else if (L.type === 'color') {
     out.color = L.content?.color || '#000000';
   }
@@ -595,10 +661,21 @@ function migrateLocal(currentEditorState) {
 // ============================================================
 
 async function save(state, opts = {}) {
+  // Make sure ids are stable before serializing
+  ensureProjectId(state);
   const doc = serialize(state, opts);
   const v = validate(doc);
   if (!v.valid) throw new Error('Project document invalid: ' + v.errors.join('; '));
+
   const project = state.project || 'default';
+  // Sanity check: doc.id should match the folder we're writing into.
+  // If they diverge, something has minted a fresh id elsewhere — log it
+  // so we can trace, but don't refuse the save (the file path uses `project`).
+  if (doc.id !== project) {
+    console.warn('[project-state] doc.id !== state.project',
+                 { 'doc.id': doc.id, 'state.project': project });
+  }
+
   const r = await fetch('/api/project/save', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -633,6 +710,7 @@ window.MC.project = {
   validate,
   serialize,
   deserialize,
+  ensureProjectId,
   migrateLocal,
   save,
   load,

@@ -32,7 +32,34 @@
         "duration":     { "type": "number", "minimum": 0 },
         "aspect_ratio": { "type": "string", "enum": ["16:9", "9:16", "1:1"] },
         "pacing":       { "type": "string", "enum": ["slow", "balanced", "fast"] },
-        "style_id":     { "type": "string" }
+        "style_id": {
+          "description": "Identifier for the active template / style preset. Must match a value the editor or Magic Edit writes into state.template. Add new values here when shipping a new template.",
+          "type": "string",
+          "enum": [
+            "custom",
+            "cinematic",
+            "real_estate",
+            "travel",
+            "social",
+            "corporate",
+            "re_drone_reveal",
+            "re_property_tour",
+            "re_listing_card",
+            "re_agent_intro",
+            "social_hook_reveal",
+            "social_listicle",
+            "cinematic_three_act",
+            "kinetic_word_pop",
+            "magic_cinematic",
+            "magic_luxury_re",
+            "magic_social_reel",
+            "magic_editorial",
+            "magic_modern_luxury",
+            "magic_moody",
+            "magic_energetic",
+            "magic_corporate"
+          ]
+        }
       }
     },
 

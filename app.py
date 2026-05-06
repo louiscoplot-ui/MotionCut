@@ -524,6 +524,18 @@ SCHEMA_URL = "https://motioncut.dev/schemas/project/v1.json"
 SCHEMA_VERSION = 1
 DOC_FILENAME = "project.motioncut.json"
 
+# Valid style_id values — mirrors schemas/project.schema.json. Update all
+# three locations (schema, JS validator, here) when adding a template.
+KNOWN_STYLE_IDS = {
+    "custom",
+    "cinematic", "real_estate", "travel", "social", "corporate",
+    "re_drone_reveal", "re_property_tour", "re_listing_card", "re_agent_intro",
+    "social_hook_reveal", "social_listicle",
+    "cinematic_three_act", "kinetic_word_pop",
+    "magic_cinematic", "magic_luxury_re", "magic_social_reel", "magic_editorial",
+    "magic_modern_luxury", "magic_moody", "magic_energetic", "magic_corporate",
+}
+
 
 def _validate_project_document(doc):
     """Minimal hand-rolled validator. Returns a list of errors (empty if valid).
@@ -542,6 +554,13 @@ def _validate_project_document(doc):
     for key in ("clips", "segments", "layers"):
         if key in doc and not isinstance(doc[key], list):
             errors.append(f"{key}: must be array")
+    ep = doc.get("edit_params") or {}
+    if ep.get("aspect_ratio") not in (None, "16:9", "9:16", "1:1"):
+        errors.append("edit_params.aspect_ratio: must be 16:9 / 9:16 / 1:1")
+    if ep.get("pacing") not in (None, "slow", "balanced", "fast"):
+        errors.append("edit_params.pacing: must be slow / balanced / fast")
+    if ep.get("style_id") is not None and ep["style_id"] not in KNOWN_STYLE_IDS:
+        errors.append(f"edit_params.style_id: unknown style '{ep['style_id']}'")
     return errors
 
 
