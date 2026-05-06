@@ -2673,7 +2673,7 @@ function setupTplPreview(thumbEl, name) {
 //  Export
 // ============================================================
 function buildExportPayload(aspectOverride) {
-  return {
+  const payload = {
     project: state.project || 'default',
     video: state.video?.filename,
     audio: state.audio?.filename || null,
@@ -2691,9 +2691,27 @@ function buildExportPayload(aspectOverride) {
     musicMode: state.music.mode,
     layers: state.layers.map(l => ({ ...l, img: undefined, canvasW, canvasH })),
   };
+  // Multi-clip mode: when a Magic Edit plan is active, ship its segments to
+  // the backend so the export concatenates real clips instead of trimming
+  // the single state.video. Legacy single-clip exports skip this entirely.
+  const segs = state.editPlan?.segments;
+  if (Array.isArray(segs) && segs.length > 0) {
+    payload.segments = segs.map(s => ({
+      clipFilename: s.clipFilename,
+      sourceIn:  Number(s.sourceIn)  || 0,
+      sourceOut: Number(s.sourceOut) || 0,
+      transition: s.transition || { type: 'cut', duration: 0 },
+    }));
+    // If the user hasn't picked their own music, fall back to the plan's pick.
+    if (!payload.audio && state.editPlan?.audio?.musicFilename) {
+      payload.audio = state.editPlan.audio.musicFilename;
+    }
+  }
+  return payload;
 }
 async function startExport(aspect) {
-  if (!state.video) { toast('Upload a video first'); return; }
+  const hasSegments = state.editPlan?.segments?.length > 0;
+  if (!state.video && !hasSegments) { toast('Upload a video first'); return; }
   const payload = buildExportPayload(aspect);
   try {
     const r = await fetch('/api/export', {

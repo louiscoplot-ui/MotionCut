@@ -1229,13 +1229,139 @@ def serve_export(filename):
 # ----------------------------------------------------------------------------
 # Export pipeline
 # ----------------------------------------------------------------------------
-def build_filter_complex(payload, target_w, target_h, duration):
+
+# xfade requires duration > 0, so a "cut" transition is rendered as a 1-frame
+# crossfade. At 30 fps this is 33 ms — visually indistinguishable from a hard
+# cut but lets the same xfade chain handle every transition type.
+MIN_XFADE_DURATION = 1.0 / 30.0
+SEGMENT_FPS = 30
+
+
+_DRAWTEXT_FONT_CACHE = None
+def _resolve_drawtext_font():
+    """Return a usable fontfile path for drawtext, escaped for filter syntax,
+    or None if no font is available (drawtext will then use its built-in default)."""
+    global _DRAWTEXT_FONT_CACHE
+    if _DRAWTEXT_FONT_CACHE is not None:
+        return _DRAWTEXT_FONT_CACHE or None
+    candidates = [
+        r"C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+    ]
+    chosen = ""
+    for p in candidates:
+        if Path(p).exists():
+            # ffmpeg filter syntax requires escaping ":" inside fontfile=
+            chosen = p.replace(":", r"\:")
+            break
+    _DRAWTEXT_FONT_CACHE = chosen
+    return chosen or None
+
+
+def build_segments_chain(segments, target_w, target_h, fps=SEGMENT_FPS):
+    """
+    Build the multi-clip filter graph that concatenates N segment inputs
+    via xfade transitions and produces a single video label.
+
+    Inputs assumed to be at indices [0:v]..[N-1:v] in the FFmpeg command.
+    Each segment dict carries { sourceIn, sourceOut, transition: { type, duration } }.
+    Trimming itself is done at the input-side via -ss/-to BEFORE -i so each
+    [k:v] is already the trimmed clip starting at PTS 0.
+
+    Returns (filter_parts, output_label, total_duration).
+
+    Transition mapping:
+        cut           -> xfade type=fade with MIN_XFADE_DURATION  (≈ hard cut)
+        crossfade     -> xfade type=fade with the requested duration
+        fade_to_black -> xfade type=fadeblack with the requested duration
+    """
+    n = len(segments)
+    parts = []
+
+    # 1) Normalize each segment input: rescale to the target canvas, lock fps,
+    #    and reset PTS so xfade offsets are measured from each clip's own zero.
+    #    Locking fps avoids xfade timing drift when sources have varying frame rates.
+    for i, seg in enumerate(segments):
+        parts.append(
+            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,fps={fps},format=yuv420p,setpts=PTS-STARTPTS[s{i}v]"
+        )
+
+    # 2) Single-segment shortcut: nothing to concat.
+    if n == 1:
+        seg_dur = max(0.01, float(segments[0]["sourceOut"]) - float(segments[0]["sourceIn"]))
+        parts.append("[s0v]null[concat]")
+        return parts, "[concat]", seg_dur
+
+    # 3) Walk the segment list, chaining xfade transitions. After processing
+    #    segment i, `running_label` represents the compound stream and
+    #    `running_length` is its duration in seconds.
+    running_label = "[s0v]"
+    running_length = max(0.01, float(segments[0]["sourceOut"]) - float(segments[0]["sourceIn"]))
+
+    for i in range(1, n):
+        seg = segments[i]
+        seg_dur = max(0.01, float(seg["sourceOut"]) - float(seg["sourceIn"]))
+        prev_seg = segments[i - 1]
+        # The transition between seg i-1 and seg i lives on the OUTGOING clip.
+        # Schema stores it on the segment that owns the outgoing edge — i.e.,
+        # prev_seg.transition is what bridges into this segment.
+        trans = (prev_seg.get("transition") or {}) if isinstance(prev_seg.get("transition"), dict) else {}
+        ttype = (trans.get("type") or "cut").lower()
+        treq  = float(trans.get("duration") or 0.0)
+
+        if ttype in ("crossfade", "xfade", "fade"):
+            xfade_kind = "fade"
+            tdur = max(MIN_XFADE_DURATION, treq if treq > 0 else 0.5)
+        elif ttype in ("fade_to_black", "fadeblack", "fade-to-black"):
+            xfade_kind = "fadeblack"
+            tdur = max(MIN_XFADE_DURATION, treq if treq > 0 else 0.5)
+        else:
+            # "cut" or anything unknown -> hard cut via 1-frame xfade.
+            xfade_kind = "fade"
+            tdur = MIN_XFADE_DURATION
+
+        # Clamp the transition so it doesn't exceed either clip's length.
+        tdur = min(tdur, max(MIN_XFADE_DURATION, running_length - 0.01),
+                          max(MIN_XFADE_DURATION, seg_dur - 0.01))
+
+        # xfade offset = where in the *compound* stream the transition begins.
+        offset = max(0.0, running_length - tdur)
+        nxt_label = f"[x{i}]"
+        parts.append(
+            f"{running_label}[s{i}v]xfade=transition={xfade_kind}:"
+            f"duration={tdur:.3f}:offset={offset:.3f}{nxt_label}"
+        )
+        running_label = nxt_label
+        running_length = running_length + seg_dur - tdur
+
+    # Rename final compound to a stable label for downstream filters.
+    parts.append(f"{running_label}null[concat]")
+    return parts, "[concat]", running_length
+
+
+def build_filter_complex(payload, target_w, target_h, duration,
+                         image_input_offset=1, prebuilt_base=None):
     """
     Build an FFmpeg -filter_complex graph from JSON payload.
-    Inputs:
-        [0:v] = source video
-        [1:v]..[N:v] = uploaded PNG/JPG overlays (optional)
-    Returns (filter_str, audio_filter_str_or_None, label_video_out, label_audio_out)
+
+    Single-clip mode (legacy, default):
+        Inputs: [0:v] = source video, [image_input_offset:v]... = overlays
+        Step 1 scales+pads+grades [0:v] into [base].
+
+    Multi-clip mode (Sprint 1):
+        The segment chain has already produced a stream that is at the
+        target canvas size. Pass its label as `prebuilt_base` (e.g.
+        "[concat]") and override `image_input_offset` to point past the
+        N segment inputs. We still apply the color grade here so it sits
+        on top of the concatenated stream uniformly.
+
+    Returns (filter_str, label_video_out).
     """
     layers = payload.get("layers", [])
     grade = payload.get("colorGrade", "natural")
@@ -1244,12 +1370,16 @@ def build_filter_complex(payload, target_w, target_h, duration):
 
     parts = []
 
-    # 1) Scale + pad source to target canvas, then color grade.
-    parts.append(
-        f"[0:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"setsar=1,{color_grade_filter(grade)}[base]"
-    )
+    # 1) Scale+pad+grade for single-clip mode, or grade-only for multi-clip
+    #    (segments already arrive scaled+padded from the segment chain).
+    if prebuilt_base is None:
+        parts.append(
+            f"[0:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,{color_grade_filter(grade)}[base]"
+        )
+    else:
+        parts.append(f"{prebuilt_base}{color_grade_filter(grade)}[base]")
 
     cur = "[base]"
 
@@ -1265,9 +1395,11 @@ def build_filter_complex(payload, target_w, target_h, duration):
         parts.append(f"{cur}vignette=PI/4[vig]")
         cur = "[vig]"
 
-    # 4) Image / logo overlays. Image inputs occupy [1:v], [2:v], ...
+    # 4) Image / logo overlays. Image inputs occupy
+    #    [image_input_offset:v], [image_input_offset+1:v], ...
     img_layers = [l for l in layers if l.get("type") in ("logo", "image")]
-    for idx, layer in enumerate(img_layers, start=1):
+    for offset_i, layer in enumerate(img_layers):
+        idx = image_input_offset + offset_i
         w = max(8, int(layer.get("width", 200) * target_w / max(1, layer.get("canvasW", target_w))))
         x = int(layer.get("x", 0) * target_w / max(1, layer.get("canvasW", target_w)))
         y = int(layer.get("y", 0) * target_h / max(1, layer.get("canvasH", target_h)))
@@ -1377,10 +1509,12 @@ def build_filter_complex(payload, target_w, target_h, duration):
             f"borderw=2:bordercolor=black@0.6:"
             f"enable='between(t,{start},{end})'"
         )
-        # Only add :font= if user passed something simple (no path) - drawtext font requires fontconfig.
-        # Use Windows font file if available.
-        win_font = r"C\\:/Windows/Fonts/arial.ttf"
-        draw += f":fontfile='{win_font}'"
+        # drawtext needs a real font file (fontconfig is unreliable across
+        # Windows / Codespaces / macOS). Resolve once at module level: prefer
+        # Windows Arial, then common Linux fallbacks.
+        font_path = _resolve_drawtext_font()
+        if font_path:
+            draw += f":fontfile='{font_path}'"
 
         parts.append(f"{cur}{draw}{nxt}")
         cur = nxt
@@ -1392,27 +1526,102 @@ def build_filter_complex(payload, target_w, target_h, duration):
 
 
 def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path,
-                   target_w, target_h, duration):
-    # In/Out marks for trimming the source video
-    in_mark  = payload.get("inMark")
-    out_mark = payload.get("outMark")
+                   target_w, target_h, duration,
+                   segment_paths=None, segments=None):
+    """
+    Render an MP4 from the editor payload.
+
+    Two modes:
+      Legacy single-clip mode (segments is None / empty):
+          Inputs = [video] [..images..] [optional music]
+          Source video honours inMark / outMark for trimming.
+
+      Multi-clip mode (Sprint 1):
+          Inputs = [seg0] [seg1] .. [segN-1] [..images..] [optional music]
+          Each segment is input-trimmed via -ss/-to and concatenated via
+          xfade transitions. Clip audio is dropped and replaced by the
+          music track (or silence) — see notes inside.
+    """
+    multi_clip = bool(segments and segment_paths and len(segments) == len(segment_paths) and len(segments) > 0)
+
     cmd = [FFMPEG, "-y"]
-    if isinstance(in_mark, (int, float)) and in_mark > 0:
-        cmd += ["-ss", f"{float(in_mark):.3f}"]
-    if isinstance(out_mark, (int, float)) and out_mark > (in_mark or 0):
-        cmd += ["-to", f"{float(out_mark):.3f}"]
-    cmd += ["-i", str(src_video)]
+
+    if multi_clip:
+        # Each segment is its own input. -ss/-to BEFORE -i is input-side
+        # trimming: cheap, seeks to the nearest keyframe. Accuracy is fine
+        # for typical Magic Edit segment boundaries (≥0.5 s).
+        for seg, path in zip(segments, segment_paths):
+            si = max(0.0, float(seg.get("sourceIn") or 0.0))
+            so = float(seg.get("sourceOut") or 0.0)
+            if so > si:
+                cmd += ["-ss", f"{si:.3f}", "-to", f"{so:.3f}"]
+            cmd += ["-i", str(path)]
+    else:
+        in_mark  = payload.get("inMark")
+        out_mark = payload.get("outMark")
+        if isinstance(in_mark, (int, float)) and in_mark > 0:
+            cmd += ["-ss", f"{float(in_mark):.3f}"]
+        if isinstance(out_mark, (int, float)) and out_mark > (in_mark or 0):
+            cmd += ["-to", f"{float(out_mark):.3f}"]
+        cmd += ["-i", str(src_video)]
+
     for p in image_paths:
         cmd += ["-i", str(p)]
     if audio_path:
         cmd += ["-i", str(audio_path)]
 
-    fc, vlabel = build_filter_complex(payload, target_w, target_h, duration)
+    if multi_clip:
+        seg_input_count = len(segments)
+        seg_parts, seg_label, total_dur = build_segments_chain(
+            segments, target_w, target_h
+        )
+        # Override the export's effective duration with the actual concatenated
+        # length so the progress bar and audio fade-out align with reality.
+        duration = total_dur
 
-    audio_idx = 1 + len(image_paths)
+        fc, vlabel = build_filter_complex(
+            payload, target_w, target_h, duration,
+            image_input_offset=seg_input_count,
+            prebuilt_base=seg_label,
+        )
+        video_filter = ";".join(seg_parts) + ";" + fc
+        audio_idx = seg_input_count + len(image_paths)
+    else:
+        fc, vlabel = build_filter_complex(payload, target_w, target_h, duration)
+        video_filter = fc
+        audio_idx = 1 + len(image_paths)
+
     has_extra_audio = audio_path is not None
 
-    if has_extra_audio:
+    if multi_clip:
+        # In multi-clip mode we don't trust the original clip audios — they may
+        # have unequal sample rates / be missing on some clips, and concat with
+        # xfade gaps is messy. Two clean paths:
+        #   - music present: use it (replace mode), faded as the user asked
+        #   - music absent: synthesize silence matching the video duration
+        if has_extra_audio:
+            vol = float(payload.get("musicVolume", 0.6))
+            vol = max(0.0, min(1.0, vol))
+            afade_in = ",afade=t=in:st=0:d=1" if payload.get("musicFadeIn") else ""
+            afade_out = ""
+            if payload.get("musicFadeOut") and duration > 1:
+                afade_out = f",afade=t=out:st={max(0, duration-1.5)}:d=1.5"
+            audio_filter = (
+                f"[{audio_idx}:a]volume={vol}{afade_in}{afade_out},"
+                f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[aout]"
+            )
+            audio_map = ["-map", "[aout]"]
+            full_filter = video_filter + ";" + audio_filter
+        else:
+            # No music chosen — emit silence so the output container still has
+            # an audio track (some players misbehave on video-only MP4s).
+            audio_filter = (
+                f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[aout]"
+            )
+            full_filter = video_filter + ";" + audio_filter
+            audio_map = ["-map", "[aout]"]
+    elif has_extra_audio:
         vol = float(payload.get("musicVolume", 0.6))
         vol = max(0.0, min(1.0, vol))
         mix_mode = payload.get("musicMode", "mix")  # mix or replace
@@ -1429,9 +1638,9 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
                 f"[0:a][mus]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             )
             audio_map = ["-map", "[aout]"]
-        full_filter = fc + ";" + audio_filter
+        full_filter = video_filter + ";" + audio_filter
     else:
-        full_filter = fc
+        full_filter = video_filter
         audio_map = ["-map", "0:a?"]
 
     cmd += [
@@ -1480,12 +1689,15 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
         if proc.returncode != 0:
             set_job(job_id, status="error", error=err[-1500:] if err else "ffmpeg failed")
             return
+        # url_for() requires a request context, but we're on a background
+        # thread. The /exports/<filename> route is static, so build the URL
+        # by hand rather than dragging in app.test_request_context().
         set_job(
             job_id,
             status="done",
             progress=100,
             output=out_path.name,
-            url=url_for("serve_export", filename=out_path.name),
+            url=f"/exports/{out_path.name}",
         )
     except FileNotFoundError:
         set_job(job_id, status="error",
@@ -1497,27 +1709,8 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
 @app.route("/api/export", methods=["POST"])
 def api_export():
     data = request.get_json(force=True, silent=True) or {}
-    src = data.get("video")
-    if not src:
-        return jsonify({"error": "missing video"}), 400
     project = data.get("project") or "default"
     pdir = project_dir(project)
-    src_path = pdir / safe_name(src)
-    if not src_path.exists():
-        # backward-compat: also check the legacy uploads root
-        legacy = UPLOAD_DIR / safe_name(src)
-        if legacy.exists():
-            src_path = legacy
-        else:
-            return jsonify({"error": f"source video not found: {src}"}), 404
-
-    aspect = data.get("aspect", "16:9")
-    if aspect == "16:9":
-        target_w, target_h = 1920, 1080
-    elif aspect == "9:16":
-        target_w, target_h = 1080, 1920
-    else:
-        target_w, target_h = 1920, 1080
 
     def find_in_project(name):
         if not name: return None
@@ -1528,6 +1721,81 @@ def api_export():
         if legacy.exists(): return legacy
         return None
 
+    aspect = data.get("aspect", "16:9")
+    if aspect == "16:9":
+        target_w, target_h = 1920, 1080
+    elif aspect == "9:16":
+        target_w, target_h = 1080, 1920
+    else:
+        target_w, target_h = 1920, 1080
+
+    # Multi-clip mode triggers when the payload carries a non-empty segments list.
+    raw_segments = data.get("segments") or []
+    multi_clip = isinstance(raw_segments, list) and len(raw_segments) > 0
+
+    src_path = None
+    segments = []
+    segment_paths = []
+    duration = 0.0
+
+    if multi_clip:
+        # Resolve each segment's clip path. Missing files are skipped with a
+        # warning rather than aborting the whole export — partial output beats
+        # no output for a 30-clip auto-edit where one file went missing.
+        skipped = []
+        for seg in raw_segments:
+            if not isinstance(seg, dict):
+                continue
+            fname = seg.get("clipFilename")
+            p = find_in_project(fname)
+            if not p:
+                skipped.append(fname)
+                continue
+            segments.append({
+                "clipFilename": fname,
+                "sourceIn": float(seg.get("sourceIn") or 0.0),
+                "sourceOut": float(seg.get("sourceOut") or 0.0),
+                "transition": seg.get("transition") or {"type": "cut", "duration": 0.0},
+            })
+            segment_paths.append(p)
+        if skipped:
+            print(f"[export] multi-clip: skipped missing clips: {skipped}")
+        if not segments:
+            return jsonify({"error": "no resolvable segments — all clip files missing"}), 404
+        # Effective duration = sum of per-segment durations minus crossfade overlaps.
+        duration = 0.0
+        prev_seg = None
+        for seg in segments:
+            d = max(0.01, seg["sourceOut"] - seg["sourceIn"])
+            duration += d
+            if prev_seg is not None:
+                t = (prev_seg.get("transition") or {})
+                ttype = (t.get("type") or "cut").lower()
+                tdur = float(t.get("duration") or 0.0)
+                if ttype in ("crossfade", "xfade", "fade", "fade_to_black", "fadeblack"):
+                    duration -= max(0.0, min(tdur, d - 0.01))
+            prev_seg = seg
+        duration = max(0.1, duration)
+        # Pick the first segment's path for any helper that still wants `src_video`
+        # (the multi-clip branch in run_export_job ignores this argument, but we
+        # keep the positional contract intact).
+        src_path = segment_paths[0]
+    else:
+        src = data.get("video")
+        if not src:
+            return jsonify({"error": "missing video"}), 400
+        src_path = pdir / safe_name(src)
+        if not src_path.exists():
+            legacy = UPLOAD_DIR / safe_name(src)
+            if legacy.exists():
+                src_path = legacy
+            else:
+                return jsonify({"error": f"source video not found: {src}"}), 404
+        full_duration = probe_duration(src_path)
+        in_mark  = data.get("inMark")  or 0
+        out_mark = data.get("outMark") or full_duration
+        duration = max(0.1, float(out_mark) - float(in_mark))
+
     image_paths = []
     for layer in data.get("layers", []):
         if layer.get("type") in ("logo", "image"):
@@ -1536,10 +1804,6 @@ def api_export():
 
     audio_path = find_in_project(data.get("audio"))
 
-    full_duration = probe_duration(src_path)
-    in_mark  = data.get("inMark")  or 0
-    out_mark = data.get("outMark") or full_duration
-    duration = max(0.1, float(out_mark) - float(in_mark))
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     template_name = re.sub(r"[^a-zA-Z0-9_-]", "_", data.get("template", "custom"))
     out_name = f"motioncut_{template_name}_{aspect.replace(':','x')}_{timestamp}.mp4"
@@ -1552,11 +1816,19 @@ def api_export():
         target=run_export_job,
         args=(job_id, data, src_path, image_paths, audio_path,
               out_path, target_w, target_h, duration),
+        kwargs={
+            "segment_paths": segment_paths if multi_clip else None,
+            "segments": segments if multi_clip else None,
+        },
         daemon=True,
     )
     t.start()
 
-    return jsonify({"ok": True, "jobId": job_id, "output": out_name})
+    return jsonify({
+        "ok": True, "jobId": job_id, "output": out_name,
+        "mode": "multi" if multi_clip else "single",
+        "segmentCount": len(segments),
+    })
 
 
 @app.route("/api/export/progress/<job_id>")
