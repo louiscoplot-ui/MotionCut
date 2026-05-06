@@ -649,4 +649,6 @@ if __name__ == "__main__":
     print(f" Exports: {EXPORT_DIR}")
     print(" Open http://localhost:5000")
     print("=" * 60)
-    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
+    # debug=True enables auto-reload on app.py changes (hot reload).
+    # For Codespaces, bind to 0.0.0.0 so the forwarded port works.
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True, use_reloader=True)
