@@ -204,8 +204,8 @@ function redo() {
 // ============================================================
 //  Upload
 // ============================================================
-const CHUNK_THRESHOLD = 25 * 1024 * 1024;   // > 25 MB → chunked
-const CHUNK_SIZE      = 20 * 1024 * 1024;   // 20 MB per chunk (under proxy caps)
+const CHUNK_THRESHOLD = 3 * 1024 * 1024;    // > 3 MB → chunked
+const CHUNK_SIZE      = 3 * 1024 * 1024;    // 3 MB per chunk (Codespaces proxy is strict)
 
 async function uploadFile(file, kind, onProgress) {
   if (file.size <= CHUNK_THRESHOLD) {
