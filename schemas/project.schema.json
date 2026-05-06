@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://motioncut.dev/schemas/project/v1.json",
+  "title": "MotionCut Project Document",
+  "description": "Single source-of-truth document for any MotionCut project. Both the frontend editor and the Flask backend (incl. all AI features) read from and write to this document. Media is referenced by relative path inside the project's uploads folder; the document never carries binary data itself.",
+  "type": "object",
+  "required": ["schema", "version", "id", "name", "created_at", "modified_at"],
+  "additionalProperties": false,
+
+  "properties": {
+    "schema": {
+      "description": "URL identifier for the schema this document conforms to.",
+      "type": "string",
+      "const": "https://motioncut.dev/schemas/project/v1.json"
+    },
+    "version": {
+      "description": "Integer version number. Bump on breaking schema changes.",
+      "type": "integer",
+      "const": 1
+    },
+
+    "id":          { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9_\\-]+$" },
+    "name":        { "type": "string", "minLength": 1, "maxLength": 200 },
+    "created_at":  { "type": "string", "format": "date-time" },
+    "modified_at": { "type": "string", "format": "date-time" },
+
+    "edit_params": {
+      "description": "User-chosen edit parameters; consumed by Magic Edit and export.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "duration":     { "type": "number", "minimum": 0 },
+        "aspect_ratio": { "type": "string", "enum": ["16:9", "9:16", "1:1"] },
+        "pacing":       { "type": "string", "enum": ["slow", "balanced", "fast"] },
+        "style_id":     { "type": "string" }
+      }
+    },
+
+    "clips": {
+      "description": "Source media available in this project. References a file by path relative to the project's uploads folder.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id":           { "type": "string", "pattern": "^clip_[A-Za-z0-9]+$" },
+          "path":         { "type": "string", "minLength": 1 },
+          "kind":         { "type": "string", "enum": ["video", "image", "audio"] },
+          "duration":     { "type": "number", "minimum": 0 },
+          "aspect_ratio": { "type": "string" },
+          "analyzed":     { "type": "boolean", "default": false },
+          "analysis":     { "$ref": "#/$defs/ClipAnalysis" }
+        }
+      }
+    },
+
+    "segments": {
+      "description": "Ordered cuts that compose the timeline. Each segment references one source clip with its in/out points and the transition that follows it.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "clip_id", "source_in", "source_out"],
+        "additionalProperties": false,
+        "properties": {
+          "id":         { "type": "string", "pattern": "^seg_[A-Za-z0-9]+$" },
+          "clip_id":    { "type": "string", "pattern": "^clip_[A-Za-z0-9]+$" },
+          "source_in":  { "type": "number", "minimum": 0 },
+          "source_out": { "type": "number", "minimum": 0 },
+          "transition": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "type":     { "type": "string", "enum": ["cut", "xfade", "fade", "wipe", "dip-to-black"] },
+              "duration": { "type": "number", "minimum": 0, "maximum": 5 }
+            }
+          }
+        }
+      }
+    },
+
+    "layers": {
+      "description": "Overlay layers (text / logo / color). Bottom of array = bottom of z-stack.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/Layer" }
+    },
+
+    "audio": {
+      "description": "Audio plan. music_path is null if no extra music is applied; the video's own audio remains.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "music_path":   { "type": ["string", "null"] },
+        "volume":       { "type": "number", "minimum": 0, "maximum": 1 },
+        "fade_in":      { "type": "boolean" },
+        "fade_out":     { "type": "boolean" },
+        "mix_mode":     { "type": "string", "enum": ["mix", "replace"] },
+        "beat_anchors": {
+          "description": "Detected beat positions in seconds, relative to the music file start.",
+          "type": "array",
+          "items": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+
+    "brand": {
+      "description": "Inline brand kit. To reference a stored brand kit by id instead, use brand_id.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agency_name": { "type": "string", "maxLength": 200 },
+        "tagline":     { "type": "string", "maxLength": 400 },
+        "primary":     { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "secondary":   { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "font":        { "type": "string" },
+        "logo_path":   { "type": ["string", "null"] }
+      }
+    },
+
+    "brand_id": {
+      "description": "Optional reference to a saved brand kit (future feature).",
+      "type": ["string", "null"]
+    },
+
+    "fx": {
+      "description": "Project-wide visual effects.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color_grade": { "type": "string", "enum": ["natural", "cinematic", "teal_orange", "moody_dark", "bright_airy", "bw"] },
+        "vignette":    { "type": "boolean" },
+        "film_grain":  { "type": "boolean" },
+        "letterbox":   { "type": "boolean" }
+      }
+    },
+
+    "playhead": {
+      "description": "Editor-time state. Persisted to allow resume-where-you-left.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "in_mark":      { "type": ["number", "null"] },
+        "out_mark":     { "type": ["number", "null"] },
+        "current_time": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "ai": {
+      "description": "Reserved for AI-generated metadata about this project (highlights, suggestions, captions).",
+      "type": "object"
+    }
+  },
+
+  "$defs": {
+    "ClipAnalysis": {
+      "description": "Cached output of the clip analyzer. ALL fields optional — analyzers may add more over time.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "shot_score":       { "type": "number", "minimum": 0, "maximum": 1 },
+        "motion":           { "type": "number", "minimum": 0 },
+        "brightness":       { "type": "number", "minimum": 0, "maximum": 1 },
+        "sharpness":        { "type": "number", "minimum": 0 },
+        "has_face":         { "type": "boolean" },
+        "shot_type":        { "type": "string", "enum": ["drone", "exterior", "interior", "detail", "talking_head", "unknown"] },
+        "scene_changes":    { "type": "array", "items": { "type": "number" } },
+        "audio_peaks":      { "type": "array", "items": { "type": "number" } },
+        "dominant_colors":  { "type": "array", "items": { "type": "string" } },
+        "analyzed_at":      { "type": "string", "format": "date-time" }
+      }
+    },
+
+    "Keyframe": {
+      "description": "One animation key. t = time in seconds (project-relative). v = scalar value. e = easing name.",
+      "type": "object",
+      "required": ["t", "v"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "type": "number", "minimum": 0 },
+        "v": { "type": "number" },
+        "e": { "type": "string", "enum": ["linear", "easeIn", "easeOut", "easeInOut", "spring", "back"] }
+      }
+    },
+
+    "Layer": {
+      "type": "object",
+      "required": ["id", "type", "timing", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "id":         { "type": "string", "pattern": "^layer_[A-Za-z0-9]+$" },
+        "type":       { "type": "string", "enum": ["text", "logo", "color"] },
+        "name":       { "type": "string" },
+        "visible":    { "type": "boolean" },
+        "locked":     { "type": "boolean" },
+        "blend_mode": { "type": "string" },
+        "content": {
+          "description": "Type-specific content. For text: typography + string. For logo: image source. For color: hex.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "timing": {
+          "type": "object",
+          "required": ["in", "out"],
+          "additionalProperties": false,
+          "properties": {
+            "in":  { "type": "number", "minimum": 0 },
+            "out": { "type": "number", "minimum": 0 }
+          }
+        },
+        "position": {
+          "description": "Layer transform. Coordinates are in canvas units (1920x1080 for 16:9).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "x":        { "type": "number" },
+            "y":        { "type": "number" },
+            "width":    { "type": "number" },
+            "height":   { "type": "number" },
+            "rotation": { "type": "number" },
+            "opacity":  { "type": "number", "minimum": 0, "maximum": 1 },
+            "scale":    { "type": "number", "minimum": 0 }
+          }
+        },
+        "animation": {
+          "description": "Animation presets for entry / exit. Independent of keyframes.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "in_type":  { "type": "string" },
+            "out_type": { "type": "string" }
+          }
+        },
+        "keyframes": {
+          "description": "Per-property keyframe arrays. Each property maps to an ordered list of Keyframe objects. When present and non-empty for a property, overrides the static value at that property's location in `position`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Keyframe" }
+          }
+        },
+        "tracking_id": {
+          "description": "Optional reference to a motion track (future feature). When set, position is derived from the track at render time.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

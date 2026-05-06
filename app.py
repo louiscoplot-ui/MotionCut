@@ -515,6 +515,107 @@ def api_projects_rename(pid):
     return jsonify({"ok": True, "id": new_pid, "name": raw_name})
 
 
+# ----------------------------------------------------------------------------
+# Project documents (project.motioncut.json) — single source of truth.
+# These endpoints are the I/O contract used by the frontend project-state.js
+# module and by every current/future AI feature.
+# ----------------------------------------------------------------------------
+SCHEMA_URL = "https://motioncut.dev/schemas/project/v1.json"
+SCHEMA_VERSION = 1
+DOC_FILENAME = "project.motioncut.json"
+
+
+def _validate_project_document(doc):
+    """Minimal hand-rolled validator. Returns a list of errors (empty if valid).
+    Mirrors schemas/project.schema.json. Frontend has a richer validator;
+    here we only enforce enough to refuse obviously broken documents."""
+    errors = []
+    if not isinstance(doc, dict):
+        return ["document must be an object"]
+    if doc.get("schema") != SCHEMA_URL:
+        errors.append(f"schema: must equal {SCHEMA_URL}")
+    if doc.get("version") != SCHEMA_VERSION:
+        errors.append(f"version: must equal {SCHEMA_VERSION}")
+    for key in ("id", "name", "created_at", "modified_at"):
+        if not isinstance(doc.get(key), str) or not doc.get(key):
+            errors.append(f"{key}: required string")
+    for key in ("clips", "segments", "layers"):
+        if key in doc and not isinstance(doc[key], list):
+            errors.append(f"{key}: must be array")
+    return errors
+
+
+def _project_doc_path(pid):
+    return project_dir(pid) / DOC_FILENAME
+
+
+@app.route("/schemas/project.schema.json")
+def serve_project_schema():
+    """Serve the JSON schema as static so tools can $ref it."""
+    return send_from_directory(str(BASE_DIR / "schemas"), "project.schema.json",
+                               mimetype="application/json")
+
+
+@app.route("/api/project/save", methods=["POST"])
+def api_project_save():
+    """
+    Save the v1 project document for a given project id.
+
+    Body: { project: <pid>, document: <ProjectDocument> }
+    Writes atomically: tmp file + rename.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    pid = data.get("project") or "default"
+    doc = data.get("document")
+    errors = _validate_project_document(doc)
+    if errors:
+        return jsonify({"error": "invalid document", "details": errors}), 400
+
+    # Always re-stamp modified_at server-side
+    doc["modified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    out = _project_doc_path(pid)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        tmp.replace(out)            # atomic — won't leave half-written files
+    except Exception as e:
+        try: tmp.unlink(missing_ok=True)
+        except Exception: pass
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "ok":          True,
+        "id":          doc["id"],
+        "modified_at": doc["modified_at"],
+        "path":        str(out.relative_to(BASE_DIR)),
+    })
+
+
+@app.route("/api/project/load/<pid>", methods=["GET"])
+def api_project_load(pid):
+    """
+    Load the v1 project document for a given project id.
+    Returns 404 if the project has no saved document yet.
+    """
+    p = _project_doc_path(pid)
+    if not p.exists():
+        return jsonify({"error": f"no project document for {pid}"}), 404
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception as e:
+        return jsonify({"error": "could not parse document: " + str(e)}), 500
+    errors = _validate_project_document(doc)
+    return jsonify({
+        "ok":       True,
+        "document": doc,
+        "warnings": errors if errors else None,
+    })
+
+
 @app.route("/exports/<path:filename>")
 def serve_export(filename):
     return send_from_directory(str(EXPORT_DIR), filename, conditional=True, as_attachment=True)
