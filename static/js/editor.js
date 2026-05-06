@@ -475,9 +475,27 @@ function pointInLayer(px, py, l) {
   return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
 }
 function pointInResizeHandle(px, py, l) {
+  return getResizeCorner(px, py, l) != null;
+}
+function getResizeCorner(px, py, l) {
   const b = getLayerBounds(l);
-  return px >= b.x + b.w - HANDLE && px <= b.x + b.w + HANDLE
-      && py >= b.y + b.h - HANDLE && py <= b.y + b.h + HANDLE;
+  const corners = {
+    tl: [b.x,         b.y],
+    tr: [b.x + b.w,   b.y],
+    bl: [b.x,         b.y + b.h],
+    br: [b.x + b.w,   b.y + b.h],
+  };
+  for (const [name, [cx, cy]] of Object.entries(corners)) {
+    if (px >= cx - HANDLE && px <= cx + HANDLE && py >= cy - HANDLE && py <= cy + HANDLE) {
+      return name;
+    }
+  }
+  return null;
+}
+function cursorForCorner(c) {
+  return (c === 'tl' || c === 'br') ? 'nwse-resize'
+       : (c === 'tr' || c === 'bl') ? 'nesw-resize'
+       : 'default';
 }
 function canvasCoordsFromEvent(e) {
   const r = canvas.getBoundingClientRect();
@@ -580,11 +598,14 @@ function selectAdd(id) {
 function onCanvasMouseDown(e) {
   if (e.button === 2) return;
   const { x, y } = canvasCoordsFromEvent(e);
-  let hit = null, mode = 'move';
+  let hit = null, mode = 'move', corner = null;
   for (let i = state.layers.length - 1; i >= 0; i--) {
     const l = state.layers[i];
     if (!l.visible || l.locked) continue;
-    if (state.selectedId === l.id && pointInResizeHandle(x, y, l)) { hit = l; mode = 'resize'; break; }
+    if (state.selectedId === l.id) {
+      const c = getResizeCorner(x, y, l);
+      if (c) { hit = l; mode = 'resize'; corner = c; break; }
+    }
     if (pointInLayer(x, y, l)) { hit = l; mode = 'move'; break; }
   }
   if (hit) {
@@ -592,14 +613,22 @@ function onCanvasMouseDown(e) {
     else if (!state.selectedIds.has(hit.id)) selectOnly(hit.id);
     else state.selectedId = hit.id;
     const b = getLayerBounds(hit);
+    // Opposite corner of the grabbed handle = fixed anchor during resize
+    const opposite = {
+      tl: { x: b.x + b.w, y: b.y + b.h },
+      tr: { x: b.x,       y: b.y + b.h },
+      bl: { x: b.x + b.w, y: b.y       },
+      br: { x: b.x,       y: b.y       },
+    }[corner] || { x: b.x, y: b.y };
     drag = {
-      id: hit.id, mode,
+      id: hit.id, mode, corner,
       offX: x - hit.x, offY: y - hit.y,
       startX: hit.x, startY: hit.y,
       startW: hit.width || b.w, startH: hit.height || b.h,
-      anchorX: b.x, anchorY: b.y,
+      startFontSize: hit.fontSize || 64,
+      origHalfDiag: Math.hypot(b.w, b.h) / 2,
+      anchor: opposite,
       origMouse: { x, y },
-      // Snapshot of all selected layers' starting positions for group move
       groupStarts: [...state.selectedIds].map(sid => {
         const sl = state.layers.find(L => L.id === sid);
         return sl ? { id: sid, x: sl.x, y: sl.y } : null;
@@ -615,8 +644,11 @@ function onCanvasMouseMove(e) {
   const { x, y } = canvasCoordsFromEvent(e);
   if (!drag) {
     const sel = state.layers.find(l => l.id === state.selectedId);
-    if (sel && pointInResizeHandle(x, y, sel)) canvas.style.cursor = 'nwse-resize';
-    else if (state.layers.some(l => pointInLayer(x, y, l))) canvas.style.cursor = 'move';
+    if (sel) {
+      const c = getResizeCorner(x, y, sel);
+      if (c) { canvas.style.cursor = cursorForCorner(c); return; }
+    }
+    if (state.layers.some(l => pointInLayer(x, y, l))) canvas.style.cursor = 'move';
     else canvas.style.cursor = 'default';
     return;
   }
@@ -651,11 +683,19 @@ function onCanvasMouseMove(e) {
     showDragTooltip(e, l);
   } else if (drag.mode === 'resize') {
     if (l.type === 'text') {
-      const newH = Math.max(20, y - drag.anchorY);
-      l.fontSize = clamp(Math.round(newH / 1.4), 12, 400);
+      // Distance from cursor to the opposite (anchor) corner relative to
+      // the original diagonal → uniformly scales fontSize. Works from any
+      // corner, shrinks below original, never gets stuck on the handle.
+      const dist = Math.hypot(x - drag.anchor.x, y - drag.anchor.y) / 2;
+      const ratio = Math.max(0.05, dist / Math.max(1, drag.origHalfDiag));
+      l.fontSize = clamp(Math.round(drag.startFontSize * ratio), 8, 600);
     } else {
-      l.width  = Math.max(20, x - drag.anchorX);
-      l.height = Math.max(20, y - drag.anchorY);
+      // Image / color: opposite corner stays fixed, cursor defines the other corner
+      const ax = drag.anchor.x, ay = drag.anchor.y;
+      l.width  = Math.max(8, Math.abs(x - ax));
+      l.height = Math.max(8, Math.abs(y - ay));
+      l.x = Math.min(x, ax);
+      l.y = Math.min(y, ay);
     }
   }
   positionFloatingToolbar();
