@@ -132,10 +132,12 @@ function makeTextLayer(opts={}) {
     text: 'Your Headline',
     x: canvasW * 0.5, y: canvasH * 0.5,
     width: 800, height: 120,
+    rotation: 0,
     fontFamily: 'Syne', fontSize: 96, fontWeight: 700,
     color: '#ffffff', align: 'center',
     start: 0, end: 8,
     animation: 'fade',
+    exit: 'auto',         // 'auto' = use animation default; or 'blur' | 'dissolve' | 'motion-blur' | 'mask-wipe' | 'defocus'
   }, opts);
 }
 function makeLogoLayer(opts={}) {
@@ -146,6 +148,7 @@ function makeLogoLayer(opts={}) {
     opacity: 1, blendMode: 'source-over',
     src: null, url: null, img: null,
     x: 60, y: 60, width: 240, height: 240,
+    rotation: 0,
     start: 0, end: 9999,
   }, opts);
 }
@@ -262,24 +265,56 @@ async function handleFile(file, kindHint) {
   const kind = kindHint || inferKind(file);
   if (!kind) { toast(`Unsupported file: ${file.name}`); return; }
   const wasVideo = !!state.video;
+
+  // ----- OPTIMISTIC: instant local preview before upload finishes -----
+  // Uses object URLs so the user sees their content within ~16ms instead of
+  // waiting for the chunked upload. Once the server confirms, we swap the
+  // filename reference to the server-side name (so exports work) but keep
+  // the local URL playing in the <video> element — no re-buffer.
+  let localUrl = null;
+  if (kind === 'video') {
+    localUrl = URL.createObjectURL(file);
+    applyVideo({ filename: file.name, url: localUrl, kind: 'video', duration: 0, _local: true });
+  } else if (kind === 'image') {
+    localUrl = URL.createObjectURL(file);
+    const img = new Image(); img.src = localUrl;
+    const layer = makeLogoLayer({ src: file.name, url: localUrl, img, _local: true });
+    img.onload = () => {
+      const r = img.naturalWidth / img.naturalHeight;
+      layer.height = layer.width / r;
+      draw();
+    };
+    state.layers.push(layer);
+    state.selectedId = layer.id;
+    $('dropzone-image').classList.add('has-file');
+    renderLayersPanel(); renderInspector(); positionFloatingToolbar(); snapshot(); draw();
+  }
+
+  // ----- Background upload via the queue widget -----
+  const queueId = uploadQueueAdd(file.name, kind);
   try {
-    toast(`Uploading ${file.name}…`, { ms: 60000, gold: true });
-    const meta = await uploadFile(file, kind, pct => {
-      toast(`Uploading ${file.name} — ${pct.toFixed(0)}%`, { ms: 60000, gold: true });
-    });
+    const meta = await uploadFile(file, kind, pct => uploadQueueProgress(queueId, pct));
+    uploadQueueDone(queueId);
+
+    // Swap optimistic refs to server-backed names so exports resolve correctly.
     if (kind === 'video') {
-      applyVideo(meta);
-      toast(wasVideo ? `Now editing ${meta.filename.replace(/^[a-f0-9]+_/,'')}` : `Loaded ${file.name}`, { gold:true });
+      if (state.video && state.video._local && state.video.filename === file.name) {
+        state.video.filename = meta.filename;
+        state.video._local = false;
+        state.video.duration = meta.duration || video.duration;
+      }
+      toast(wasVideo ? `Now editing ${file.name}` : `Loaded ${file.name}`, { gold: true });
     } else if (kind === 'image') {
-      applyLogo(meta);
+      const lay = state.layers.find(l => l._local && l.src === file.name && l.type === 'logo');
+      if (lay) { lay.src = meta.filename; lay._local = false; }
       toast(`Logo added: ${file.name}`);
     } else if (kind === 'audio') {
       applyMusic(meta);
       toast(`Music: ${file.name}`);
     }
-    // Refresh the project library so newly uploaded files appear in it
     refreshLibrary();
   } catch (e) {
+    uploadQueueFail(queueId, e.message);
     toast(`Error: ${e.message}`);
   }
 }
@@ -378,6 +413,73 @@ async function detectBeats(url) {
 }
 
 // ============================================================
+//  Upload queue (top-right, stacked progress pills)
+// ============================================================
+const _uq = new Map();          // id -> { el, name, kind, pct, status }
+let   _uqSeq = 0;
+
+function uploadQueueRoot() {
+  let root = $('upload-queue');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'upload-queue';
+    root.className = 'upload-queue';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+function uploadQueueAdd(name, kind) {
+  const id = 'uq_' + (++_uqSeq);
+  const root = uploadQueueRoot();
+  const el = document.createElement('div');
+  el.className = 'uq-pill';
+  el.innerHTML = `
+    <i data-lucide="${kind === 'video' ? 'film' : kind === 'image' ? 'image' : 'music'}"></i>
+    <div class="uq-info">
+      <div class="uq-name">${escapeHTML(name)}</div>
+      <div class="uq-bar"><div class="uq-bar-fill" style="width:0%"></div></div>
+    </div>
+    <span class="uq-pct mono">0%</span>`;
+  root.appendChild(el);
+  refreshIcons();
+  if (window.gsap) gsap.from(el, { opacity: 0, x: 12, duration: 0.24, ease: 'power3.out' });
+  _uq.set(id, { el, name, kind, pct: 0, status: 'uploading' });
+  return id;
+}
+function uploadQueueProgress(id, pct) {
+  const item = _uq.get(id); if (!item) return;
+  item.pct = pct;
+  item.el.querySelector('.uq-bar-fill').style.width = pct + '%';
+  item.el.querySelector('.uq-pct').textContent = pct.toFixed(0) + '%';
+}
+function uploadQueueDone(id) {
+  const item = _uq.get(id); if (!item) return;
+  item.status = 'done';
+  item.el.classList.add('done');
+  item.el.querySelector('.uq-bar-fill').style.width = '100%';
+  item.el.querySelector('.uq-pct').textContent = '✓';
+  setTimeout(() => uploadQueueRemove(id), 1200);
+}
+function uploadQueueFail(id, msg) {
+  const item = _uq.get(id); if (!item) return;
+  item.status = 'error';
+  item.el.classList.add('error');
+  item.el.querySelector('.uq-pct').textContent = '!';
+  item.el.title = msg || '';
+  setTimeout(() => uploadQueueRemove(id), 4000);
+}
+function uploadQueueRemove(id) {
+  const item = _uq.get(id); if (!item) return;
+  if (window.gsap) {
+    gsap.to(item.el, { opacity: 0, x: 12, duration: 0.20, ease: 'power3.out',
+      onComplete: () => item.el.remove() });
+  } else {
+    item.el.remove();
+  }
+  _uq.delete(id);
+}
+
+// ============================================================
 //  Drop-anywhere overlay
 // ============================================================
 function bindDropOverlay() {
@@ -473,6 +575,17 @@ function pointInLayer(px, py, l) {
   if (!l.visible || l.locked) return false;
   const b = getLayerBounds(l);
   return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+}
+const ROT_OFFSET = 36;
+function getRotationHandlePos(l) {
+  const b = getLayerBounds(l);
+  const cx = b.x + b.w / 2;
+  const cy = b.y - ROT_OFFSET;
+  return { x: cx, y: cy, anchorX: b.x + b.w / 2, anchorY: b.y + b.h / 2 };
+}
+function pointInRotationHandle(px, py, l) {
+  const r = getRotationHandlePos(l);
+  return Math.hypot(px - r.x, py - r.y) <= HANDLE * 0.9;
 }
 function pointInResizeHandle(px, py, l) {
   return getResizeCorner(px, py, l) != null;
@@ -605,6 +718,7 @@ function onCanvasMouseDown(e) {
     if (state.selectedId === l.id) {
       const c = getResizeCorner(x, y, l);
       if (c) { hit = l; mode = 'resize'; corner = c; break; }
+      if (pointInRotationHandle(x, y, l)) { hit = l; mode = 'rotate'; break; }
     }
     if (pointInLayer(x, y, l)) { hit = l; mode = 'move'; break; }
   }
@@ -620,6 +734,9 @@ function onCanvasMouseDown(e) {
       bl: { x: b.x + b.w, y: b.y       },
       br: { x: b.x,       y: b.y       },
     }[corner] || { x: b.x, y: b.y };
+    const rotInfo = getRotationHandlePos(hit);
+    const startAngle = (hit.rotation || 0);
+    const cursorAngle = Math.atan2(y - rotInfo.anchorY, x - rotInfo.anchorX);
     drag = {
       id: hit.id, mode, corner,
       offX: x - hit.x, offY: y - hit.y,
@@ -629,6 +746,9 @@ function onCanvasMouseDown(e) {
       origHalfDiag: Math.hypot(b.w, b.h) / 2,
       anchor: opposite,
       origMouse: { x, y },
+      startAngle,
+      startCursorAngle: cursorAngle,
+      rotCenter: { x: rotInfo.anchorX, y: rotInfo.anchorY },
       groupStarts: [...state.selectedIds].map(sid => {
         const sl = state.layers.find(L => L.id === sid);
         return sl ? { id: sid, x: sl.x, y: sl.y } : null;
@@ -647,6 +767,7 @@ function onCanvasMouseMove(e) {
     if (sel) {
       const c = getResizeCorner(x, y, sel);
       if (c) { canvas.style.cursor = cursorForCorner(c); return; }
+      if (pointInRotationHandle(x, y, sel)) { canvas.style.cursor = 'grab'; return; }
     }
     if (state.layers.some(l => pointInLayer(x, y, l))) canvas.style.cursor = 'move';
     else canvas.style.cursor = 'default';
@@ -681,6 +802,18 @@ function onCanvasMouseMove(e) {
     }
     drawSnapGuides(snap.guides);
     showDragTooltip(e, l);
+  } else if (drag.mode === 'rotate') {
+    const cur = Math.atan2(y - drag.rotCenter.y, x - drag.rotCenter.x);
+    let deltaDeg = (cur - drag.startCursorAngle) * 180 / Math.PI;
+    let newAngle = drag.startAngle + deltaDeg;
+    // Normalize to [-180, 180]
+    while (newAngle > 180)  newAngle -= 360;
+    while (newAngle < -180) newAngle += 360;
+    // Shift snaps to 15°
+    if (e.shiftKey) newAngle = Math.round(newAngle / 15) * 15;
+    l.rotation = newAngle;
+    showDragTooltip(e, l);
+    if (dragTooltip) dragTooltip.textContent = `${newAngle.toFixed(0)}°`;
   } else if (drag.mode === 'resize') {
     if (l.type === 'text') {
       // Distance from cursor to the opposite (anchor) corner relative to
@@ -707,6 +840,85 @@ function onCanvasMouseUp() {
 }
 
 // ============================================================
+//  Inline canvas text editing (double-click any text layer)
+// ============================================================
+let _inlineEdit = null;     // { layerId, el }
+
+function startInlineTextEdit(layerId) {
+  if (_inlineEdit) commitInlineTextEdit();
+  const l = state.layers.find(L => L.id === layerId);
+  if (!l || l.type !== 'text' || l.locked) return;
+  state.selectedId = layerId;
+
+  // Position the editable input over the canvas at the same screen rect
+  const b = getLayerBounds(l);
+  const innerRect = stageInner.getBoundingClientRect();
+  const innerR = stageInner.getBoundingClientRect();
+  const sx = innerR.width  / canvasW;
+  const sy = innerR.height / canvasH;
+  const editor = document.createElement('div');
+  editor.className = 'canvas-inline-edit';
+  editor.contentEditable = 'true';
+  editor.spellcheck = false;
+  editor.textContent = l.text || '';
+  // Style to match the layer
+  editor.style.position = 'absolute';
+  editor.style.left   = ((b.x) * sx) + 'px';
+  editor.style.top    = ((b.y) * sy) + 'px';
+  editor.style.minWidth  = (b.w * sx) + 'px';
+  editor.style.height = (b.h * sy) + 'px';
+  editor.style.fontFamily = `"${l.fontFamily}", sans-serif`;
+  editor.style.fontWeight = l.fontWeight || 700;
+  editor.style.fontSize   = (l.fontSize * sy) + 'px';
+  editor.style.color = l.color;
+  editor.style.textAlign = l.align || 'center';
+  editor.style.lineHeight = '1.2';
+  if (l.rotation) editor.style.transform = `rotate(${l.rotation}deg)`;
+  stageInner.appendChild(editor);
+
+  // Hide the layer's canvas-rendered text while inline-editing so we don't see double
+  l._editingInline = true;
+  draw();
+
+  editor.focus();
+  // Place caret at end
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+
+  _inlineEdit = { layerId, el: editor };
+
+  editor.addEventListener('blur', commitInlineTextEdit);
+  editor.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); cancelInlineTextEdit(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitInlineTextEdit(); }
+  });
+}
+
+function commitInlineTextEdit() {
+  if (!_inlineEdit) return;
+  const { layerId, el } = _inlineEdit;
+  const newText = el.innerText.replace(/\n+$/,'').trim();
+  const l = state.layers.find(L => L.id === layerId);
+  if (l) {
+    if (newText && newText !== l.text) { l.text = newText; snapshot(); }
+    l._editingInline = false;
+  }
+  el.remove();
+  _inlineEdit = null;
+  renderInspector(); draw();
+}
+function cancelInlineTextEdit() {
+  if (!_inlineEdit) return;
+  const l = state.layers.find(L => L.id === _inlineEdit.layerId);
+  if (l) l._editingInline = false;
+  _inlineEdit.el.remove();
+  _inlineEdit = null;
+  draw();
+}
+
+// ============================================================
 //  Drawing
 // ============================================================
 function applyCanvasFilter() {
@@ -722,7 +934,7 @@ function applyCanvasFilter() {
 function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
 function drawTextLayer(l, t) {
-  if (!l.visible) return;
+  if (!l.visible || l._editingInline) return;
   // While paused, ALWAYS show selected layers at full opacity so the user
   // can see what they're editing — even if the playhead is outside the
   // layer's time range.
@@ -738,6 +950,32 @@ function drawTextLayer(l, t) {
   const local = t - l.start, dur = l.end - l.start;
   const inP = clamp(local / 0.6, 0, 1);
   const outP = clamp((l.end - t) / 0.6, 0, 1);
+  // Cinematic exits — applied during the last 0.7s if exit !== 'auto'
+  const exitDur = 0.7;
+  const inExit = (l.exit && l.exit !== 'auto') && t > (l.end - exitDur) && t <= l.end;
+  let exitFilter = '';
+  let exitAlpha = 1;
+  if (inExit) {
+    const eP = clamp((l.end - t) / exitDur, 0, 1);  // 1 → 0 across exit
+    const tw = 1 - eP;                              // 0 → 1
+    if (l.exit === 'blur') {
+      exitFilter = `blur(${(tw * 18).toFixed(1)}px)`;
+      exitAlpha = eP;
+    } else if (l.exit === 'motion-blur') {
+      exitFilter = `blur(${(tw * 8).toFixed(1)}px)`;
+      dx += tw * 60;
+      exitAlpha = eP;
+    } else if (l.exit === 'defocus') {
+      exitFilter = `blur(${(tw * 10).toFixed(1)}px) brightness(${(1 + tw * 0.3).toFixed(2)})`;
+      exitAlpha = eP;
+    } else if (l.exit === 'dissolve') {
+      // grain-like alpha collapse handled below per-letter when drawing
+      exitAlpha = eP;
+    } else if (l.exit === 'mask-wipe') {
+      // mask sweep handled in clip below
+      exitAlpha = 1;
+    }
+  }
 
   switch (l.animation) {
     case 'fade':
@@ -777,7 +1015,8 @@ function drawTextLayer(l, t) {
       alpha *= Math.min(easeOut(inP), easeOut(outP));
   }
 
-  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.globalAlpha = clamp(alpha * exitAlpha, 0, 1);
+  if (exitFilter) ctx.filter = exitFilter;
   ctx.fillStyle = l.color;
   ctx.textAlign = l.align || 'center';
   ctx.textBaseline = 'middle';
@@ -785,7 +1024,43 @@ function drawTextLayer(l, t) {
   ctx.shadowColor = ctx.shadowColor || 'rgba(0,0,0,0.55)';
   ctx.shadowBlur  = ctx.shadowBlur  || 8;
 
-  if (l.animation === 'zoom') {
+  // Mask-wipe exit: clip to a shrinking box from one edge
+  if (inExit && l.exit === 'mask-wipe') {
+    const eP = clamp((l.end - t) / exitDur, 0, 1);
+    const b = getLayerBounds(l);
+    ctx.beginPath();
+    ctx.rect(b.x, b.y, b.w * eP, b.h);
+    ctx.clip();
+  }
+  // Dissolve exit: per-letter random fade
+  if (inExit && l.exit === 'dissolve') {
+    const eP = clamp((l.end - t) / exitDur, 0, 1);
+    const chars = drawText.split('');
+    let xCursor = (l.x + dx) - (ctx.measureText(drawText).width / 2);
+    ctx.textAlign = 'left';
+    for (let i = 0; i < chars.length; i++) {
+      // Pseudo-random per-char delay
+      const seed = (chars.charCodeAt ? chars[i].charCodeAt(0) * 0.137 : i * 0.31) % 1;
+      const charP = clamp((eP - seed * 0.5) / (1 - seed * 0.5 + 0.001), 0, 1);
+      ctx.globalAlpha = charP;
+      ctx.fillText(chars[i], xCursor, l.y + dy);
+      xCursor += ctx.measureText(chars[i]).width;
+    }
+    ctx.restore();
+    return;
+  }
+
+  // Rotation: pivot around the layer's anchor (l.x, l.y)
+  const rad = ((l.rotation || 0) * Math.PI) / 180;
+  if (rad) {
+    ctx.translate(l.x + dx, l.y + dy);
+    ctx.rotate(rad);
+    if (l.animation === 'zoom') {
+      const s = 1 + 0.04 * Math.sin(local * 3);
+      ctx.scale(s, s);
+    }
+    ctx.fillText(drawText, 0, 0);
+  } else if (l.animation === 'zoom') {
     const s = 1 + 0.04 * Math.sin(local * 3);
     ctx.translate(l.x + dx, l.y + dy); ctx.scale(s, s);
     ctx.fillText(drawText, 0, 0);
@@ -804,7 +1079,16 @@ function drawLogoLayer(l, t) {
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
   ctx.globalAlpha = l.opacity ?? 1;
-  ctx.drawImage(l.img, l.x, l.y, l.width, l.height);
+  const rad = ((l.rotation || 0) * Math.PI) / 180;
+  if (rad) {
+    const cx = l.x + l.width / 2;
+    const cy = l.y + l.height / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.drawImage(l.img, -l.width / 2, -l.height / 2, l.width, l.height);
+  } else {
+    ctx.drawImage(l.img, l.x, l.y, l.width, l.height);
+  }
   ctx.restore();
 }
 
@@ -852,6 +1136,24 @@ function drawSelection() {
       ctx.fillStyle = '#f0c040';
       const corners = [[b.x,b.y],[b.x+b.w,b.y],[b.x,b.y+b.h],[b.x+b.w,b.y+b.h]];
       for (const [cx,cy] of corners) ctx.fillRect(cx - HANDLE/2, cy - HANDLE/2, HANDLE, HANDLE);
+      // Rotation handle: line up + circle
+      const r = getRotationHandlePos(l);
+      ctx.beginPath();
+      ctx.moveTo(b.x + b.w / 2, b.y);
+      ctx.lineTo(r.x, r.y);
+      ctx.strokeStyle = '#f0c040';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, HANDLE * 0.55, 0, Math.PI * 2);
+      ctx.fillStyle = '#f0c040';
+      ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#f0c040';
+      ctx.stroke();
     }
   }
   ctx.restore();
@@ -1067,7 +1369,8 @@ function renderInspector() {
     <div class="row-grid-2">
       <label class="row col"><span data-scrub="x">X</span><input type="number" data-prop="x" value="${Math.round(l.x)}"/></label>
       <label class="row col"><span data-scrub="y">Y</span><input type="number" data-prop="y" value="${Math.round(l.y)}"/></label>
-    </div>`;
+    </div>
+    <label class="row col"><span data-scrub="rotation">Rotation (°)</span><input type="number" step="1" data-prop="rotation" value="${Math.round(l.rotation||0)}"/></label>`;
 
   if (l.type === 'text') {
     html += `
@@ -1110,9 +1413,20 @@ function renderInspector() {
       </select></label>`;
 
   if (l.type === 'text') {
-    html += `<label class="row col no-scrub"><span class="no-scrub">Animation</span>
+    html += `<label class="row col no-scrub"><span class="no-scrub">Animation in</span>
       <select data-prop="animation">
         ${['none','fade','tracking','reveal','typewriter','zoom','glow','bounce','cinematic'].map(a=>`<option ${a===l.animation?'selected':''}>${a}</option>`).join('')}
+      </select></label>
+      <label class="row col no-scrub"><span class="no-scrub">Animation out</span>
+      <select data-prop="exit">
+        ${[
+          ['auto','auto (matches in)'],
+          ['blur','cinematic blur out'],
+          ['motion-blur','motion blur drift'],
+          ['defocus','defocus glow'],
+          ['dissolve','grain dissolve'],
+          ['mask-wipe','mask wipe']
+        ].map(([v,lbl])=>`<option value="${v}" ${v===(l.exit||'auto')?'selected':''}>${lbl}</option>`).join('')}
       </select></label>`;
   }
   html += `</div>`;
@@ -2113,6 +2427,15 @@ function init() {
   canvas.addEventListener('mousedown', onCanvasMouseDown);
   canvas.addEventListener('mousemove', onCanvasMouseMove);
   window.addEventListener('mouseup',  onCanvasMouseUp);
+  // Double-click any text layer to edit inline
+  canvas.addEventListener('dblclick', (e) => {
+    const { x, y } = canvasCoordsFromEvent(e);
+    for (let i = state.layers.length - 1; i >= 0; i--) {
+      const l = state.layers[i];
+      if (l.type !== 'text' || !l.visible || l.locked) continue;
+      if (pointInLayer(x, y, l)) { startInlineTextEdit(l.id); break; }
+    }
+  });
 
   // Canvas right-click
   canvas.addEventListener('contextmenu', (e) => {

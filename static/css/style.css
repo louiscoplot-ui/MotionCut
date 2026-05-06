@@ -415,6 +415,21 @@ kbd {
 .canvas-floating button.danger:hover { color: var(--danger); }
 .canvas-floating .cf-divider { width: 1px; background: var(--line-2); margin: 4px 2px; }
 
+/* Canvas inline text editor (double-click to edit a text layer) */
+.canvas-inline-edit {
+  z-index: 10;
+  outline: 2px dashed var(--gold);
+  outline-offset: 4px;
+  background: rgba(0,0,0,0.2);
+  padding: 2px 6px;
+  cursor: text;
+  white-space: pre-wrap;
+  caret-color: var(--gold-2);
+  border-radius: 2px;
+  transform-origin: center center;
+}
+.canvas-inline-edit:focus { outline-color: var(--gold-2); }
+
 /* Snap SVG overlay */
 .snap-svg {
   position: absolute; inset: 0;
@@ -1482,6 +1497,76 @@ kbd {
   font-family: var(--f-mono);
   font-size: 10px;
   color: var(--tx-4);
+}
+
+/* ============================================================
+   UPLOAD QUEUE (stacked progress pills, top-right of viewport)
+   ============================================================ */
+.upload-queue {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  z-index: 90;
+  display: flex; flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  width: 280px;
+  max-width: calc(100vw - 32px);
+}
+.uq-pill {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  background: var(--s-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  pointer-events: auto;
+  font-size: 11.5px;
+  color: var(--tx-1);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.uq-pill [data-lucide] { width: 14px; height: 14px; color: var(--gold-2); flex-shrink: 0; }
+.uq-info { flex: 1; min-width: 0; }
+.uq-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+  margin-bottom: 4px;
+  font-size: 11.5px;
+}
+.uq-bar {
+  height: 3px;
+  background: var(--s-4);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.uq-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold-2), var(--gold-3));
+  transition: width 220ms var(--ease-quart);
+}
+.uq-pct {
+  font-size: 10.5px;
+  color: var(--tx-3);
+  min-width: 28px;
+  text-align: right;
+  font-weight: 600;
+}
+.uq-pill.done {
+  border-color: rgba(52,211,153,0.45);
+  background: rgba(52,211,153,0.06);
+}
+.uq-pill.done .uq-bar-fill { background: var(--green); }
+.uq-pill.done .uq-pct { color: var(--green); }
+.uq-pill.error {
+  border-color: rgba(239,70,85,0.5);
+  background: rgba(239,70,85,0.06);
+}
+.uq-pill.error .uq-bar-fill { background: var(--danger); }
+.uq-pill.error .uq-pct { color: var(--danger); }
+html[data-theme="light"] .uq-pill {
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
 }
 
 /* ============================================================
