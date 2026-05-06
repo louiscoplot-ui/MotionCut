@@ -37,6 +37,67 @@
 <!-- ============= CONTEXT MENU ============= -->
 <div id="ctx-menu" class="ctx-menu" role="menu"></div>
 
+<!-- ============= MAGIC EDIT MODAL ============= -->
+<div id="magic-backdrop" class="magic-backdrop">
+  <div class="magic" role="dialog" aria-label="Magic Edit">
+    <div class="magic-head">
+      <div class="magic-title">
+        <i data-lucide="sparkles"></i>
+        <span data-i18n="magic.title">Magic Edit</span>
+      </div>
+      <div class="magic-sub" data-i18n="magic.sub">Drop in your media. Pick a vibe. Let MotionCut compose a first cut.</div>
+    </div>
+    <div class="magic-body">
+      <div class="magic-row">
+        <label data-i18n="magic.duration">Duration</label>
+        <div class="magic-chips" data-group="duration">
+          <button class="magic-chip on"  data-value="15">15 s</button>
+          <button class="magic-chip"     data-value="30">30 s</button>
+          <button class="magic-chip"     data-value="45">45 s</button>
+          <button class="magic-chip"     data-value="60">60 s</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.aspect">Aspect</label>
+        <div class="magic-chips" data-group="aspect">
+          <button class="magic-chip on"  data-value="16:9">16:9</button>
+          <button class="magic-chip"     data-value="9:16">9:16</button>
+          <button class="magic-chip"     data-value="1:1">1:1</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.style">Style</label>
+        <div class="magic-chips wrap" data-group="style">
+          <button class="magic-chip on"  data-value="cinematic">Cinematic</button>
+          <button class="magic-chip"     data-value="luxury_re">Luxury real estate</button>
+          <button class="magic-chip"     data-value="social_reel">Social reel</button>
+          <button class="magic-chip"     data-value="editorial">Editorial</button>
+          <button class="magic-chip"     data-value="modern_luxury">Modern luxury</button>
+          <button class="magic-chip"     data-value="moody">Moody</button>
+          <button class="magic-chip"     data-value="energetic">Energetic</button>
+          <button class="magic-chip"     data-value="corporate">Corporate</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.pacing">Pacing</label>
+        <div class="magic-chips" data-group="pacing">
+          <button class="magic-chip"     data-value="slow">Slow cinematic</button>
+          <button class="magic-chip on"  data-value="balanced">Balanced</button>
+          <button class="magic-chip"     data-value="fast">Fast social</button>
+        </div>
+      </div>
+      <div id="magic-summary" class="magic-summary"></div>
+    </div>
+    <div class="magic-foot">
+      <button id="magic-cancel" class="cta-outline" data-i18n="magic.cancel">Cancel</button>
+      <button id="magic-go" class="cta">
+        <i data-lucide="wand-sparkles"></i>
+        <span data-i18n="magic.generate">Generate cinematic edit</span>
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ============= TOPBAR ============= -->
 <header class="topbar">
   <div class="topbar-left">
@@ -87,6 +148,10 @@
     <div class="topbar-divider"></div>
     <button id="btn-theme" class="ic-btn" title="Toggle theme" data-i18n-attr="title:topbar.theme"><i data-lucide="sun"></i></button>
     <button id="btn-lang" class="ic-btn lang-btn" title="Language" data-i18n-attr="title:topbar.lang"><span class="lang-label">EN</span></button>
+    <button id="btn-magic" class="magic-btn" title="Magic Edit (AI-assisted cinematic edit)">
+      <i data-lucide="sparkles"></i>
+      <span data-i18n="magic.btn">Magic Edit</span>
+    </button>
     <span id="ffmpeg-status" class="status-dot" title="FFmpeg status">
       <span class="dot"></span><span class="lbl" data-i18n="topbar.ffmpeg">FFmpeg</span>
     </span>

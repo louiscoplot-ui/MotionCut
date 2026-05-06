@@ -1744,6 +1744,284 @@ function applyBrandToCurrentLayers() {
 }
 
 // ============================================================
+//  MAGIC EDIT — AI-assisted cinematic generation (v1)
+//  Frontend-only MVP. Builds a polished overlay sequence over the
+//  currently loaded video using brand kit + chosen style + pacing.
+//  Beat-snaps title timings if music is present.
+//
+//  Future evolution (next sessions):
+//   - Multi-clip auto-cut via FFmpeg concat + xfade
+//   - Backend shot scoring (signalstats / scene detection)
+//   - Local-first ML for highlight detection (mediapipe / ONNX)
+//   - Drone vs interior auto-classifier
+//   - Auto-caption from audio (Whisper.cpp WASM)
+//   - Smart re-frame for vertical via face detection
+// ============================================================
+const MAGIC_STYLES = {
+  cinematic: {
+    grade: 'cinematic', vignette: true, letterbox: true, grain: true,
+    titleFont: 'Playfair Display', titleSize: 110, titleAnim: 'cinematic', titleExit: 'defocus',
+    subFont:   'Syne',             subSize:   34,  subAnim:   'fade',      subExit:   'blur',
+    accent: '${brand.primary}',
+    titleA: 'A FILM BY ${brand.agencyName}',
+    titleB: 'Composed in MotionCut',
+    titleC: '— end —',
+  },
+  luxury_re: {
+    grade: 'bright_airy', vignette: false, letterbox: false, grain: false,
+    titleFont: 'Orbitron',         titleSize: 84, titleAnim: 'tracking',  titleExit: 'mask-wipe',
+    subFont:   'Syne',             subSize:   30, subAnim:   'fade',      subExit:   'blur',
+    accent: '${brand.primary}',
+    titleA: '${brand.agencyName}',
+    titleB: 'New Listing',
+    titleC: 'Inquire today',
+  },
+  social_reel: {
+    grade: 'moody_dark', vignette: true, letterbox: false, grain: false,
+    titleFont: 'Bebas Neue',       titleSize: 180, titleAnim: 'bounce',   titleExit: 'mask-wipe',
+    subFont:   'Syne',             subSize:   42,  subAnim:  'fade',      subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: 'WAIT FOR IT',
+    titleB: 'GAME · CHANGER',
+    titleC: '#fyp #foryou',
+  },
+  editorial: {
+    grade: 'natural', vignette: false, letterbox: true, grain: true,
+    titleFont: 'Playfair Display', titleSize: 90, titleAnim: 'cinematic', titleExit: 'dissolve',
+    subFont:   'Inter',            subSize:   28, subAnim:  'fade',       subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: 'CHAPTER · ONE',
+    titleB: 'A short story',
+    titleC: 'Continued.',
+  },
+  modern_luxury: {
+    grade: 'cinematic', vignette: true, letterbox: false, grain: false,
+    titleFont: 'Manrope',          titleSize: 84, titleAnim: 'tracking',  titleExit: 'blur',
+    subFont:   'Manrope',          subSize:   28, subAnim:  'fade',       subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: '${brand.agencyName}',
+    titleB: '${brand.tagline}',
+    titleC: '— next chapter —',
+  },
+  moody: {
+    grade: 'moody_dark', vignette: true, letterbox: true, grain: true,
+    titleFont: 'Playfair Display', titleSize: 100, titleAnim: 'cinematic', titleExit: 'defocus',
+    subFont:   'Syne',             subSize:   28,  subAnim:  'fade',       subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: 'IN  THE  QUIET',
+    titleB: 'breathe',
+    titleC: '— ad infinitum —',
+  },
+  energetic: {
+    grade: 'teal_orange', vignette: false, letterbox: false, grain: false,
+    titleFont: 'Bebas Neue',       titleSize: 200, titleAnim: 'bounce',   titleExit: 'mask-wipe',
+    subFont:   'Space Grotesk',    subSize:   40,  subAnim:  'reveal',    subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: 'GO!',
+    titleB: 'MOVE · FAST',
+    titleC: 'SHIP IT',
+  },
+  corporate: {
+    grade: 'natural', vignette: false, letterbox: false, grain: false,
+    titleFont: 'Inter',            titleSize: 64, titleAnim: 'fade',      titleExit: 'blur',
+    subFont:   'Inter',            subSize:   26, subAnim:  'fade',       subExit:  'blur',
+    accent: '${brand.primary}',
+    titleA: '${brand.agencyName}',
+    titleB: '${brand.tagline}',
+    titleC: 'Q4 · 2026',
+  },
+};
+
+const PACING_PROFILES = {
+  // segments per minute (approximately)
+  slow:     { sps: 6,  ease: 'easeOut',   zoomAmt: 0.08, vignettePulse: false },
+  balanced: { sps: 9,  ease: 'easeOut',   zoomAmt: 0.10, vignettePulse: false },
+  fast:     { sps: 14, ease: 'easeOutQuart', zoomAmt: 0.14, vignettePulse: true },
+};
+
+/** Snap a target time to the nearest beat within tolerance, if possible. */
+function snapTimeToBeat(t, tolerance = 0.25) {
+  const beats = state.beats;
+  if (!beats || !beats.length) return t;
+  let best = t, bd = tolerance + 1;
+  for (const b of beats) {
+    const d = Math.abs(b - t);
+    if (d < bd) { bd = d; best = b; }
+  }
+  return bd <= tolerance ? best : t;
+}
+
+/** Generate a polished cinematic timeline from inputs.
+ *  opts = { duration, aspect, style, pacing } */
+function generateMagicEdit(opts) {
+  if (!state.video) { toast('Drop a video first'); return; }
+  const dur     = parseFloat(opts.duration) || 30;
+  const aspect  = opts.aspect || '16:9';
+  const styleId = opts.style || 'cinematic';
+  const pacing  = PACING_PROFILES[opts.pacing] || PACING_PROFILES.balanced;
+  const style   = MAGIC_STYLES[styleId] || MAGIC_STYLES.cinematic;
+
+  // Apply scene-level styling
+  setAspect(aspect);
+  state.fx.grade     = style.grade;
+  state.fx.vignette  = style.vignette;
+  state.fx.grain     = style.grain;
+  state.letterbox    = style.letterbox;
+  syncStyleControls();
+
+  // Trim source to the chosen duration
+  state.inMark  = 0;
+  state.outMark = Math.min(dur, video.duration || dur);
+
+  // Clear existing layers (the magic edit replaces the overlay timeline)
+  state.layers   = [];
+  state.selectedIds.clear();
+  state.selectedId = null;
+
+  // ---- Build segment plan (3 title beats: opener, middle, end) ----
+  const segCount = 3;
+  const beats = [
+    Math.max(0.4, dur * 0.05),
+    Math.max(1.0, dur * 0.45),
+    Math.max(1.5, dur * 0.85),
+  ].map(t => snapTimeToBeat(t));
+  const titleDur = Math.min(3.5, dur / segCount);
+
+  const titleSpecs = [
+    { text: brandSub(style.titleA), font: style.titleFont, size: style.titleSize,
+      anim: style.titleAnim, exit: style.titleExit, color: '#ffffff', start: beats[0] },
+    { text: brandSub(style.titleB), font: style.subFont,   size: style.subSize,
+      anim: style.subAnim,   exit: style.subExit,   color: brandSub(style.accent), start: beats[1] },
+    { text: brandSub(style.titleC), font: style.titleFont, size: Math.round(style.titleSize * 0.7),
+      anim: style.titleAnim, exit: style.titleExit, color: '#ffffff', start: beats[2] },
+  ];
+
+  for (const spec of titleSpecs) {
+    if (!spec.text) continue;
+    const startT = spec.start;
+    const endT   = Math.min(state.outMark, startT + titleDur);
+    const layer = makeTextLayer({
+      text: spec.text, fontFamily: spec.font, fontSize: spec.size,
+      x: canvasW / 2, y: canvasH * 0.5,
+      color: spec.color || '#ffffff',
+      animation: spec.anim, exit: spec.exit,
+      start: startT, end: endT,
+    });
+    // Add a subtle Y drift via keyframes (pacing-driven)
+    setKeyframe(layer, 'y', startT,         canvasH * 0.5 + 6, 'easeOut');
+    setKeyframe(layer, 'y', startT + 0.6,   canvasH * 0.5,     'easeOut');
+    setKeyframe(layer, 'y', endT - 0.4,     canvasH * 0.5,     'easeOut');
+    setKeyframe(layer, 'y', endT,           canvasH * 0.5 - 4, 'easeOut');
+    // Subtle scale breathe for cinematic / luxury / moody
+    if (['cinematic','luxury_re','modern_luxury','moody','editorial'].includes(styleId)) {
+      setKeyframe(layer, 'scale', startT,             1.0, 'easeOut');
+      setKeyframe(layer, 'scale', (startT + endT)/2,  1 + pacing.zoomAmt * 0.18, 'easeInOut');
+      setKeyframe(layer, 'scale', endT,               1.0, 'easeOut');
+    }
+    state.layers.push(layer);
+  }
+
+  // Inject brand logo if available (corner placement)
+  if (state.brand?.logoUrl) {
+    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = state.brand.logoUrl;
+    const pad = canvasW * 0.04;
+    const w   = Math.min(220, canvasW * 0.10);
+    const logo = makeLogoLayer({
+      src: state.brand.logoFile || 'brand_logo',
+      url: state.brand.logoUrl, img,
+      x: pad, y: pad, width: w, height: w,
+      opacity: 0.92, _brandLogo: true,
+      start: 0, end: state.outMark,
+    });
+    img.onload = () => { logo.height = w / (img.naturalWidth / img.naturalHeight); draw(); };
+    state.layers.unshift(logo);
+  }
+
+  // For real estate styles, add a permanent address/price ribbon
+  if (styleId === 'luxury_re') {
+    const ribbon = makeColorLayer({
+      x: 0, y: canvasH * 0.86, width: canvasW, height: canvasH * 0.14,
+      color: '#000000', opacity: 0.5, start: 0, end: state.outMark,
+    });
+    const address = makeTextLayer({
+      text: state.brand?.tagline || 'Premium listing',
+      fontFamily: style.subFont, fontSize: 32,
+      x: canvasW * 0.05, y: canvasH * 0.93, align: 'left',
+      color: '#ffffff', animation: 'fade',
+      start: 0.4, end: state.outMark, exit: 'blur',
+    });
+    state.layers.push(ribbon, address);
+  }
+
+  state.template = 'magic_' + styleId;
+  state.selectedId = state.layers[0]?.id || null;
+  renderLayersPanel(); renderInspector(); positionFloatingToolbar();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  draw(); snapshot();
+  if (state.audio && (!state.beats || !state.beats.length)) {
+    toast('Tip: detect beats on your music for tighter cuts', { gold: true, ms: 4000 });
+  } else {
+    toast(`Magic Edit · ${styleId.replace('_',' ')} · ${dur}s`, { gold: true });
+  }
+}
+
+// ---------- Magic Edit modal wiring ----------
+function bindMagicEdit() {
+  const backdrop = $('magic-backdrop');
+  const open = () => {
+    if (!state.video) { toast('Drop a video first to use Magic Edit'); return; }
+    backdrop.classList.add('show');
+    updateMagicSummary();
+    refreshIcons();
+  };
+  const close = () => backdrop.classList.remove('show');
+
+  $('btn-magic')?.addEventListener('click', open);
+  $('magic-cancel')?.addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && backdrop.classList.contains('show')) { e.preventDefault(); close(); }
+  });
+
+  // Chip groups behave like radio buttons
+  document.querySelectorAll('.magic-chips').forEach(group => {
+    group.addEventListener('click', (e) => {
+      const chip = e.target.closest('.magic-chip'); if (!chip) return;
+      group.querySelectorAll('.magic-chip').forEach(c => c.classList.toggle('on', c === chip));
+      updateMagicSummary();
+    });
+  });
+
+  $('magic-go')?.addEventListener('click', () => {
+    const opts = {
+      duration: document.querySelector('.magic-chips[data-group="duration"] .magic-chip.on')?.dataset.value,
+      aspect:   document.querySelector('.magic-chips[data-group="aspect"] .magic-chip.on')?.dataset.value,
+      style:    document.querySelector('.magic-chips[data-group="style"] .magic-chip.on')?.dataset.value,
+      pacing:   document.querySelector('.magic-chips[data-group="pacing"] .magic-chip.on')?.dataset.value,
+    };
+    close();
+    setTimeout(() => generateMagicEdit(opts), 60);
+  });
+}
+
+function updateMagicSummary() {
+  const sum = $('magic-summary'); if (!sum) return;
+  const opts = {
+    duration: document.querySelector('.magic-chips[data-group="duration"] .magic-chip.on')?.dataset.value,
+    aspect:   document.querySelector('.magic-chips[data-group="aspect"] .magic-chip.on')?.dataset.value,
+    style:    document.querySelector('.magic-chips[data-group="style"] .magic-chip.on')?.dataset.value,
+    pacing:   document.querySelector('.magic-chips[data-group="pacing"] .magic-chip.on')?.dataset.value,
+  };
+  const beat = state.beats?.length ? `· ${state.beats.length} beats locked` : '';
+  const brand = state.brand?.agencyName ? `· branded for ${state.brand.agencyName}` : '';
+  sum.innerHTML = `
+    <div class="magic-summary-line"><i data-lucide="film"></i> <strong>${opts.duration}s</strong> ${opts.aspect}</div>
+    <div class="magic-summary-line"><i data-lucide="palette"></i> <strong>${opts.style.replace('_',' ')}</strong> · ${opts.pacing} pacing</div>
+    <div class="magic-summary-line muted"><i data-lucide="check-circle-2"></i> Title cards · keyframe drift · brand-aware ${beat} ${brand}</div>`;
+  refreshIcons();
+}
+
+// ============================================================
 //  Templates
 // ============================================================
 const templates = {
@@ -2233,6 +2511,7 @@ const CMDS = [
   { id:'snap-beat',  label:'Toggle snap to beats', cat:'Audio', icon:'audio-waveform', run:()=>{ state.snapToBeat = !state.snapToBeat; toast('Snap to beat: '+(state.snapToBeat?'on':'off'), { gold:state.snapToBeat }); }},
   { id:'detect-beats', label:'Detect beats from music', cat:'Audio', icon:'activity', run:()=>{ if (!state.audio) toast('Drop music first'); else detectBeats(state.audio.url); }},
   { id:'theme',      label:'Toggle light / dark theme', cat:'View',  icon:'sun', run:toggleTheme },
+  { id:'magic',      label:'Magic Edit (AI cinematic edit)', cat:'AI', icon:'sparkles', run:()=>$('btn-magic')?.click() },
 ];
 
 // ============================================================
@@ -2839,6 +3118,9 @@ function init() {
 
   // Cmd+K palette
   bindCmdk();
+
+  // Magic Edit
+  bindMagicEdit();
 
   // Keyboard
   window.addEventListener('keydown', onKey);
