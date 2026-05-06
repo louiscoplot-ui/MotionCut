@@ -1035,6 +1035,48 @@ kbd {
 .row span.no-scrub { cursor: default; }
 .row em { color: var(--gold-2); font-style: normal; font-weight: 600; font-family: var(--f-mono); font-size: 11px; }
 
+/* Keyframe pill — sits next to a label, toggles a keyframe at the playhead */
+.row-lbl {
+  display: inline-flex; align-items: center; gap: 6px;
+  width: 100%;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--tx-3);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.kf-pill {
+  margin-left: auto;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px;
+  color: var(--tx-4);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  transition: all var(--d-2) var(--ease-quart);
+  cursor: pointer;
+  padding: 0;
+  font-weight: 600;
+  line-height: 1;
+}
+.kf-pill:hover { color: var(--gold-2); border-color: rgba(240,192,64,0.5); }
+.kf-pill.has   { color: var(--gold-2); border-color: rgba(240,192,64,0.45); background: rgba(240,192,64,0.05); }
+.kf-pill.on    { background: var(--gold); color: #000; border-color: var(--gold); }
+
+/* Timeline keyframe diamond markers */
+.tl-kf-dot {
+  position: absolute;
+  top: 50%;
+  width: 7px; height: 7px;
+  margin-top: -3.5px;
+  margin-left: -3.5px;
+  background: var(--gold-2);
+  transform: rotate(45deg);
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(240,192,64,0.6);
+}
+
 /* Two-up grid for X/Y, W/H pairs */
 .row-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
 

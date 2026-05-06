@@ -944,17 +944,21 @@ function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
 function drawTextLayer(l, t) {
   if (!l.visible || l._editingInline) return;
-  // While paused, ALWAYS show selected layers at full opacity so the user
-  // can see what they're editing — even if the playhead is outside the
-  // layer's time range.
   const selected = state.selectedIds.has(l.id) || state.selectedId === l.id;
   const peek = selected && video?.paused;
   if (!peek && (t < l.start || t > l.end)) return;
-  // For animation math, clamp time into the layer's range during peek
   if (peek) t = Math.max(l.start, Math.min(l.end, l.start + (l.end - l.start) * 0.5));
+  // Effective values from keyframes (fall back to scalar)
+  const ex      = effProp(l, 'x', t);
+  const ey      = effProp(l, 'y', t);
+  const eRot    = effProp(l, 'rotation', t) || 0;
+  const eOp     = effProp(l, 'opacity', t);
+  const eScale  = (l.kf?.scale?.length ? evalKf(l.kf.scale, t, 1) : 1);
+  const eFsRaw  = (l.kf?.fontSize?.length ? evalKf(l.kf.fontSize, t, l.fontSize) : l.fontSize);
+  const eFs     = eFsRaw * eScale;
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
-  let alpha = (l.opacity ?? 1), dx = 0, dy = 0;
+  let alpha = (eOp ?? 1), dx = 0, dy = 0;
   let drawText = l.text || '';
   const local = t - l.start, dur = l.end - l.start;
   const inP = clamp(local / 0.6, 0, 1);
@@ -1029,7 +1033,7 @@ function drawTextLayer(l, t) {
   ctx.fillStyle = l.color;
   ctx.textAlign = l.align || 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = `${l.fontWeight || 700} ${l.fontSize}px "${l.fontFamily}", sans-serif`;
+  ctx.font = `${l.fontWeight || 700} ${eFs}px "${l.fontFamily}", sans-serif`;
   ctx.shadowColor = ctx.shadowColor || 'rgba(0,0,0,0.55)';
   ctx.shadowBlur  = ctx.shadowBlur  || 8;
 
@@ -1045,24 +1049,23 @@ function drawTextLayer(l, t) {
   if (inExit && l.exit === 'dissolve') {
     const eP = clamp((l.end - t) / exitDur, 0, 1);
     const chars = drawText.split('');
-    let xCursor = (l.x + dx) - (ctx.measureText(drawText).width / 2);
+    let xCursor = (ex + dx) - (ctx.measureText(drawText).width / 2);
     ctx.textAlign = 'left';
     for (let i = 0; i < chars.length; i++) {
-      // Pseudo-random per-char delay
       const seed = (chars.charCodeAt ? chars[i].charCodeAt(0) * 0.137 : i * 0.31) % 1;
       const charP = clamp((eP - seed * 0.5) / (1 - seed * 0.5 + 0.001), 0, 1);
       ctx.globalAlpha = charP;
-      ctx.fillText(chars[i], xCursor, l.y + dy);
+      ctx.fillText(chars[i], xCursor, ey + dy);
       xCursor += ctx.measureText(chars[i]).width;
     }
     ctx.restore();
     return;
   }
 
-  // Rotation: pivot around the layer's anchor (l.x, l.y)
-  const rad = ((l.rotation || 0) * Math.PI) / 180;
+  // Rotation: pivot around the layer's anchor (effective x/y)
+  const rad = (eRot * Math.PI) / 180;
   if (rad) {
-    ctx.translate(l.x + dx, l.y + dy);
+    ctx.translate(ex + dx, ey + dy);
     ctx.rotate(rad);
     if (l.animation === 'zoom') {
       const s = 1 + 0.04 * Math.sin(local * 3);
@@ -1071,10 +1074,10 @@ function drawTextLayer(l, t) {
     ctx.fillText(drawText, 0, 0);
   } else if (l.animation === 'zoom') {
     const s = 1 + 0.04 * Math.sin(local * 3);
-    ctx.translate(l.x + dx, l.y + dy); ctx.scale(s, s);
+    ctx.translate(ex + dx, ey + dy); ctx.scale(s, s);
     ctx.fillText(drawText, 0, 0);
   } else {
-    ctx.fillText(drawText, l.x + dx, l.y + dy);
+    ctx.fillText(drawText, ex + dx, ey + dy);
   }
   ctx.restore();
 }
@@ -1085,18 +1088,25 @@ function drawLogoLayer(l, t) {
   const peek = selected && video?.paused;
   if (!peek && (t < l.start || t > l.end)) return;
   if (!l.img || !l.img.complete) return;
+  const ex   = effProp(l, 'x', t);
+  const ey   = effProp(l, 'y', t);
+  const eRot = effProp(l, 'rotation', t) || 0;
+  const eOp  = effProp(l, 'opacity', t);
+  const eSc  = (l.kf?.scale?.length ? evalKf(l.kf.scale, t, 1) : 1);
+  const w = l.width  * eSc;
+  const h = l.height * eSc;
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
-  ctx.globalAlpha = l.opacity ?? 1;
-  const rad = ((l.rotation || 0) * Math.PI) / 180;
+  ctx.globalAlpha = eOp ?? 1;
+  const rad = (eRot * Math.PI) / 180;
   if (rad) {
-    const cx = l.x + l.width / 2;
-    const cy = l.y + l.height / 2;
+    const cx = ex + w / 2;
+    const cy = ey + h / 2;
     ctx.translate(cx, cy);
     ctx.rotate(rad);
-    ctx.drawImage(l.img, -l.width / 2, -l.height / 2, l.width, l.height);
+    ctx.drawImage(l.img, -w / 2, -h / 2, w, h);
   } else {
-    ctx.drawImage(l.img, l.x, l.y, l.width, l.height);
+    ctx.drawImage(l.img, ex, ey, w, h);
   }
   ctx.restore();
 }
@@ -1106,10 +1116,13 @@ function drawColorLayer(l, t) {
   const selected = state.selectedIds.has(l.id) || state.selectedId === l.id;
   const peek = selected && video?.paused;
   if (!peek && (t < l.start || t > l.end)) return;
+  const ex  = effProp(l, 'x', t);
+  const ey  = effProp(l, 'y', t);
+  const eOp = effProp(l, 'opacity', t);
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
-  ctx.fillStyle = l.color; ctx.globalAlpha = l.opacity;
-  ctx.fillRect(l.x, l.y, l.width, l.height);
+  ctx.fillStyle = l.color; ctx.globalAlpha = eOp;
+  ctx.fillRect(ex, ey, l.width, l.height);
   ctx.restore();
 }
 
@@ -1373,17 +1386,22 @@ function renderInspector() {
 
   const opacityPct = Math.round((l.opacity ?? 1) * 100);
   let html = '';
+  const kfPill = (prop) => {
+    const has = (l.kf?.[prop]?.length || 0) > 0;
+    const cur = video && hasKeyframeAt(l, prop, video.currentTime || 0);
+    return `<button class="kf-pill ${has?'has':''} ${cur?'on':''}" data-kf="${prop}" title="Toggle keyframe at playhead">◆</button>`;
+  };
   html += `<div class="inspector-section">
     <div class="inspector-section-label">Position & size</div>
     <div class="row-grid-2">
-      <label class="row col"><span data-scrub="x">X</span><input type="number" data-prop="x" value="${Math.round(l.x)}"/></label>
-      <label class="row col"><span data-scrub="y">Y</span><input type="number" data-prop="y" value="${Math.round(l.y)}"/></label>
+      <label class="row col"><span class="row-lbl"><span data-scrub="x">X</span>${kfPill('x')}</span><input type="number" data-prop="x" value="${Math.round(l.x)}"/></label>
+      <label class="row col"><span class="row-lbl"><span data-scrub="y">Y</span>${kfPill('y')}</span><input type="number" data-prop="y" value="${Math.round(l.y)}"/></label>
     </div>
-    <label class="row col"><span data-scrub="rotation">Rotation (°)</span><input type="number" step="1" data-prop="rotation" value="${Math.round(l.rotation||0)}"/></label>`;
+    <label class="row col"><span class="row-lbl"><span data-scrub="rotation">Rotation (°)</span>${kfPill('rotation')}</span><input type="number" step="1" data-prop="rotation" value="${Math.round(l.rotation||0)}"/></label>`;
 
   if (l.type === 'text') {
     html += `
-      <label class="row col"><span data-scrub="fontSize">Size</span><input type="number" data-prop="fontSize" value="${l.fontSize}"/></label>
+      <label class="row col"><span class="row-lbl"><span data-scrub="fontSize">Size</span>${kfPill('fontSize')}</span><input type="number" data-prop="fontSize" value="${l.fontSize}"/></label>
       <label class="row col no-scrub"><span class="no-scrub">Text</span><input type="text" data-prop="text" value="${escapeHTML(l.text)}"/></label>
       <label class="row col no-scrub"><span class="no-scrub">Font</span>
         <select data-prop="fontFamily">${FONTS.map(f=>`<option ${f===l.fontFamily?'selected':''}>${f}</option>`).join('')}</select></label>
@@ -1414,7 +1432,7 @@ function renderInspector() {
   // Common: opacity, blend, animation, timing
   html += `<div class="inspector-section">
     <div class="inspector-section-label">Layer</div>
-    <label class="row col"><span class="no-scrub">Opacity <em>${opacityPct}%</em></span>
+    <label class="row col"><span class="row-lbl"><span class="no-scrub">Opacity <em>${opacityPct}%</em></span>${kfPill('opacity')}</span>
       <input type="range" min="0" max="100" value="${opacityPct}" data-prop="opacity100"/></label>
     <label class="row col no-scrub"><span class="no-scrub">Blend</span>
       <select data-prop="blendMode">
@@ -1454,15 +1472,35 @@ function renderInspector() {
 }
 
 function bindInspectorInputs() {
+  inspectorBodyEl.querySelectorAll('[data-kf]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const sel = state.layers.find(L => L.id === state.selectedId); if (!sel) return;
+      const prop = btn.dataset.kf;
+      const t = video?.currentTime || 0;
+      toggleKeyframe(sel, prop, t);
+      snapshot(); renderInspector(); draw(); tlRender();
+    });
+  });
   inspectorBodyEl.querySelectorAll('[data-prop]').forEach(inp => {
     const prop = inp.dataset.prop;
     inp.addEventListener('input', () => {
       const sel = state.layers.find(L => L.id === state.selectedId);
       if (!sel) return;
       let val = inp.type === 'number' ? parseFloat(inp.value) : inp.value;
-      if (prop === 'opacity100') sel.opacity = (parseFloat(val)||0)/100;
-      else if (prop === 'preset') applyLogoPreset(sel, val);
-      else sel[prop] = val;
+      const t = video?.currentTime || 0;
+      if (prop === 'opacity100') {
+        sel.opacity = (parseFloat(val)||0)/100;
+        if (hasKeyframeAt(sel, 'opacity', t)) setKeyframe(sel, 'opacity', t, sel.opacity);
+      } else if (prop === 'preset') {
+        applyLogoPreset(sel, val);
+      } else {
+        sel[prop] = val;
+        // If a keyframe already exists at the playhead for this prop, update it
+        if (KF_PROPS.includes(prop) && hasKeyframeAt(sel, prop, t)) {
+          setKeyframe(sel, prop, t, val);
+        }
+      }
       draw(); renderLayersPanel();
     });
     inp.addEventListener('change', () => snapshot());
@@ -1528,6 +1566,83 @@ function syncStyleControls() {
   $('music-fadein').checked = state.music.fadeIn;
   $('music-fadeout').checked = state.music.fadeOut;
   $('music-mode').value = state.music.mode;
+}
+
+// ============================================================
+//  Keyframe engine
+//  layer.kf = { x:[{t,v,e}], y:[...], rotation:[...], opacity:[...], scale:[...], fontSize:[...] }
+//  Backward compatible: layers without `kf` use scalar properties.
+// ============================================================
+const EASES = {
+  linear:    t => t,
+  easeIn:    t => t * t,
+  easeOut:   t => 1 - Math.pow(1 - t, 3),
+  easeInOut: t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2,
+  spring:    t => 1 - Math.pow(1 - t, 5),
+  back:      t => 1 + 1.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2),
+};
+const KF_PROPS = ['x', 'y', 'rotation', 'opacity', 'scale', 'fontSize'];
+
+function evalKf(kf, t, fallback) {
+  if (!kf || !kf.length) return fallback;
+  if (t <= kf[0].t) return kf[0].v;
+  if (t >= kf[kf.length - 1].t) return kf[kf.length - 1].v;
+  for (let i = 1; i < kf.length; i++) {
+    if (kf[i].t >= t) {
+      const a = kf[i-1], b = kf[i];
+      const span = b.t - a.t;
+      const p = span > 0 ? (t - a.t) / span : 0;
+      const ease = EASES[b.e || 'easeOut'] || EASES.easeOut;
+      return a.v + (b.v - a.v) * ease(p);
+    }
+  }
+  return fallback;
+}
+
+/** Compute the effective value of a property at time t. */
+function effProp(layer, prop, t) {
+  const kf = layer.kf?.[prop];
+  if (kf && kf.length) return evalKf(kf, t, layer[prop] ?? 0);
+  return layer[prop];
+}
+
+function setKeyframe(layer, prop, t, value, ease = 'easeOut') {
+  if (!layer.kf) layer.kf = {};
+  if (!layer.kf[prop]) layer.kf[prop] = [];
+  const arr = layer.kf[prop];
+  // Replace existing keyframe at this time (within 30ms) or insert sorted
+  const EPS = 0.03;
+  for (let i = 0; i < arr.length; i++) {
+    if (Math.abs(arr[i].t - t) < EPS) { arr[i].v = value; arr[i].e = ease; return; }
+  }
+  arr.push({ t, v: value, e: ease });
+  arr.sort((a, b) => a.t - b.t);
+}
+
+function removeKeyframe(layer, prop, t) {
+  const arr = layer.kf?.[prop];
+  if (!arr) return false;
+  const EPS = 0.03;
+  const idx = arr.findIndex(k => Math.abs(k.t - t) < EPS);
+  if (idx < 0) return false;
+  arr.splice(idx, 1);
+  if (!arr.length) delete layer.kf[prop];
+  if (layer.kf && Object.keys(layer.kf).length === 0) delete layer.kf;
+  return true;
+}
+
+function hasKeyframeAt(layer, prop, t) {
+  const arr = layer.kf?.[prop];
+  if (!arr) return false;
+  return arr.some(k => Math.abs(k.t - t) < 0.03);
+}
+
+function toggleKeyframe(layer, prop, t) {
+  if (hasKeyframeAt(layer, prop, t)) {
+    removeKeyframe(layer, prop, t);
+  } else {
+    setKeyframe(layer, prop, t, layer[prop]);
+  }
 }
 
 // ============================================================

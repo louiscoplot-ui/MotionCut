@@ -236,6 +236,28 @@ function renderOverlayTrack(dur) {
 
   tr.innerHTML = html;
   refreshIcons();
+  // Keyframe diamond markers on each clip
+  tr.querySelectorAll('.tl-clip[data-id]').forEach(clipEl => {
+    const id = clipEl.dataset.id;
+    const layer = api.state.layers.find(L => L.id === id);
+    if (!layer || !layer.kf) return;
+    const s = clamp(layer.start, 0, dur);
+    const e = clamp(layer.end > 9000 ? dur : layer.end, s + 0.1, dur);
+    const allTimes = new Set();
+    for (const prop of Object.keys(layer.kf)) {
+      for (const k of layer.kf[prop]) {
+        if (k.t >= s - 0.001 && k.t <= e + 0.001) allTimes.add(Math.round(k.t * 100) / 100);
+      }
+    }
+    const left0 = s * pps;
+    for (const kt of allTimes) {
+      const dot = document.createElement('div');
+      dot.className = 'tl-kf-dot';
+      dot.style.left = ((kt * pps) - left0) + 'px';
+      dot.title = `Keyframe @ ${kt.toFixed(2)}s`;
+      clipEl.appendChild(dot);
+    }
+  });
 }
 
 function renderAudioTrack(dur) {
