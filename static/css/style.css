@@ -2033,3 +2033,18 @@ html[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: var(--gol
   .layout { grid-template-columns: 1fr 280px; }
   .panel { padding: 10px; }
 }
+
+.dropzone.is-loading {
+  position: relative;
+  overflow: hidden;
+}
+.dropzone.is-loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, rgba(240,192,64,0.06) 20%, rgba(240,192,64,0.22) 45%, rgba(240,192,64,0.06) 70%);
+  transform: translateX(-100%);
+  animation: dz-sheen 1.05s linear infinite;
+  pointer-events: none;
+}
+@keyframes dz-sheen { to { transform: translateX(100%); } }
