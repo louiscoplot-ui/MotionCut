@@ -410,7 +410,11 @@ function serialize(state, opts = {}) {
   }
 
   /** @type {Layer[]} */
-  const layers = (state.layers || []).map(l => layerToDoc(l));
+  // Skip layers still in optimistic upload phase (_local=true). Their `src`
+  // points to the local file name, not the server one — persisting them
+  // would 404 on reload. They'll be picked up by the next snapshot once
+  // the upload completes and `_local` is cleared.
+  const layers = (state.layers || []).filter(l => !l._local).map(l => layerToDoc(l));
 
   /** @type {ProjectDocument} */
   const doc = {

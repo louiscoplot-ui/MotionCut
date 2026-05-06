@@ -324,10 +324,14 @@ async function handleFile(file, kindHint) {
         state.video.duration = meta.duration || video.duration;
       }
       toast(wasVideo ? `Now editing ${file.name}` : `Loaded ${file.name}`, { gold: true });
+      // Re-snapshot now that the server filename is set — without this the
+      // autosave debounce could fire with the OLD local filename in scope.
+      snapshot();
     } else if (kind === 'image') {
       const lay = state.layers.find(l => l._local && l.src === file.name && l.type === 'logo');
       if (lay) { lay.src = meta.filename; lay._local = false; }
       toast(`Logo added: ${file.name}`);
+      snapshot();
     } else if (kind === 'audio') {
       applyMusic(meta);
       toast(`Music: ${file.name}`);
