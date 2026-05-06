@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MotionCut — Local Video Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Orbitron:wght@500;700;900&family=Teko:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo-mark"></span>
+    <h1>MOTION<span>CUT</span></h1>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-undo"  class="ghost" title="Undo (Ctrl+Z)">↶ Undo</button>
+    <button id="btn-redo"  class="ghost" title="Redo (Ctrl+Y)">↷ Redo</button>
+    <button id="btn-save-project" class="ghost">Save Project</button>
+    <label class="ghost file-label" for="load-project">Load Project
+      <input type="file" id="load-project" accept="application/json" hidden />
+    </label>
+    <span id="ffmpeg-status" class="pill">FFmpeg: …</span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============================ LEFT SIDEBAR ============================ -->
+  <aside class="sidebar left">
+    <section class="panel">
+      <h2>Media</h2>
+      <div id="dropzone-video" class="dropzone">
+        <strong>Drop Video</strong>
+        <small>MP4 / MOV / WebM — up to 2GB</small>
+        <input type="file" id="file-video" accept="video/*" hidden />
+      </div>
+      <div id="dropzone-image" class="dropzone slim">
+        <strong>Drop Logo / PNG</strong>
+        <small>PNG / JPG</small>
+        <input type="file" id="file-image" accept="image/*" hidden />
+      </div>
+      <div id="dropzone-audio" class="dropzone slim">
+        <strong>Drop Music</strong>
+        <small>MP3 / WAV</small>
+        <input type="file" id="file-audio" accept="audio/*" hidden />
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Add Layer</h2>
+      <button id="btn-add-text"  class="primary block">+ Text Layer</button>
+      <button id="btn-add-logo"  class="block ghost">+ Logo / Image</button>
+      <button id="btn-add-color" class="block ghost">+ Color Overlay</button>
+    </section>
+
+    <section class="panel">
+      <h2>Layer Properties</h2>
+      <div id="layer-props" class="layer-props">
+        <p class="muted">Select a layer on the canvas to edit.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Effects</h2>
+      <label class="row"><input type="checkbox" id="fx-vignette" /> Vignette</label>
+      <label class="row"><input type="checkbox" id="fx-grain" /> Film Grain</label>
+      <label class="row col">
+        <span>Color Grade</span>
+        <select id="fx-grade">
+          <option value="natural">Natural</option>
+          <option value="cinematic">Cinematic</option>
+          <option value="teal_orange">Teal & Orange</option>
+          <option value="moody_dark">Moody Dark</option>
+          <option value="bright_airy">Bright Airy</option>
+          <option value="bw">Black &amp; White</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Music</h2>
+      <div id="music-info" class="muted small">No music loaded.</div>
+      <label class="row col">
+        <span>Volume <em id="music-vol-label">60%</em></span>
+        <input type="range" id="music-volume" min="0" max="100" value="60" />
+      </label>
+      <label class="row"><input type="checkbox" id="music-fadein" /> Fade in</label>
+      <label class="row"><input type="checkbox" id="music-fadeout" /> Fade out</label>
+      <label class="row col">
+        <span>Mode</span>
+        <select id="music-mode">
+          <option value="mix">Mix with original</option>
+          <option value="replace">Replace original</option>
+        </select>
+      </label>
+    </section>
+  </aside>
+
+  <!-- ============================== CENTER STAGE ========================== -->
+  <section class="stage">
+    <div class="stage-toolbar">
+      <button id="btn-play" class="play">▶</button>
+      <span id="time-display" class="mono">00:00 / 00:00</span>
+      <div class="aspect-toggle">
+        <button class="aspect on" data-aspect="16:9">16:9</button>
+        <button class="aspect"     data-aspect="9:16">9:16</button>
+      </div>
+      <button id="btn-delete-layer" class="ghost danger" title="Delete selected (Del)">🗑 Delete Layer</button>
+    </div>
+
+    <div id="stage-wrap" class="stage-wrap aspect-16-9">
+      <div id="stage-inner" class="stage-inner">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+      </div>
+    </div>
+
+    <div class="timeline-wrap">
+      <input type="range" id="scrubber" min="0" max="1000" value="0" step="1" />
+      <div id="timeline-ticks" class="timeline-ticks"></div>
+    </div>
+
+    <div id="layer-list" class="layer-list"></div>
+  </section>
+
+  <!-- ============================ RIGHT SIDEBAR =========================== -->
+  <aside class="sidebar right">
+    <section class="panel">
+      <h2>Templates</h2>
+      <div class="templates">
+        <button class="tpl" data-template="cinematic">
+          <span class="tpl-name">Cinematic</span>
+          <span class="tpl-desc">Letterbox + title fade</span>
+        </button>
+        <button class="tpl" data-template="real_estate">
+          <span class="tpl-name">Real Estate</span>
+          <span class="tpl-desc">Drone reveal w/ price tag</span>
+        </button>
+        <button class="tpl" data-template="travel">
+          <span class="tpl-name">Travel</span>
+          <span class="tpl-desc">Full-width title reveal</span>
+        </button>
+        <button class="tpl" data-template="social">
+          <span class="tpl-name">Social 9:16</span>
+          <span class="tpl-desc">Reels / TikTok bold</span>
+        </button>
+        <button class="tpl" data-template="corporate">
+          <span class="tpl-name">Corporate</span>
+          <span class="tpl-desc">Clean minimal title</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Export</h2>
+      <button id="btn-export-169" class="primary block">⬇ Export 16:9 — 1920×1080</button>
+      <button id="btn-export-916" class="primary block">⬇ Export 9:16 — 1080×1920</button>
+
+      <div id="export-progress" class="export-progress hidden">
+        <div class="bar"><div id="export-bar" class="bar-fill"></div></div>
+        <div id="export-status" class="muted small">Starting…</div>
+      </div>
+
+      <div id="export-done" class="export-done hidden">
+        <a id="export-link" href="#" download>⤓ Download MP4</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Shortcuts</h2>
+      <ul class="kbd-list">
+        <li><kbd>Space</kbd> Play / pause</li>
+        <li><kbd>←</kbd> / <kbd>→</kbd> Step 1 frame</li>
+        <li><kbd>Del</kbd> Remove selected layer</li>
+        <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> Undo / redo</li>
+      </ul>
+    </section>
+  </aside>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="{{ url_for('static', filename='js/editor.js') }}"></script>
+</body>
+</html>
