@@ -316,21 +316,33 @@ function setup() {
     obs.observe(toastEl, { attributes: true });
   }
 
-  // 8. Cmd+K palette / drop overlay — animate via observers
-  const cmdk = document.getElementById('cmdk-backdrop');
-  if (cmdk) {
+  // 8. Cmd+K palette / drop overlay / context menu — animate via class observers.
+  //
+  // CRITICAL: when the .show class is REMOVED, we MUST kill any running tween
+  // and clear the inline styles GSAP has set (opacity, transform). Otherwise
+  // GSAP's inline `opacity: 1` permanently overrides the CSS transition that
+  // would normally fade the element back to 0 — leaving the overlay stuck on
+  // screen even after every JS handler has correctly removed `.show`.
+  function watchOverlayClass(el, onShow) {
+    if (!el) return;
+    const inner = el.querySelector('.cmdk, .drop-overlay-inner');
     const obs = new MutationObserver(() => {
-      if (cmdk.classList.contains('show')) overlayShow(cmdk);
+      if (el.classList.contains('show')) {
+        onShow(el);
+      } else {
+        gsap.killTweensOf(el);
+        if (inner) gsap.killTweensOf(inner);
+        gsap.set(el, { clearProps: 'opacity,transform' });
+        if (inner) gsap.set(inner, { clearProps: 'opacity,transform,scale,x,y' });
+      }
     });
-    obs.observe(cmdk, { attributes: true });
+    obs.observe(el, { attributes: true, attributeFilter: ['class'] });
   }
-  const drop = document.getElementById('drop-overlay');
-  if (drop) {
-    const obs = new MutationObserver(() => {
-      if (drop.classList.contains('show')) overlayShow(drop);
-    });
-    obs.observe(drop, { attributes: true });
-  }
+
+  watchOverlayClass(document.getElementById('cmdk-backdrop'), overlayShow);
+  watchOverlayClass(document.getElementById('drop-overlay'),  overlayShow);
+
+  // Context menu uses a slightly different show animation
   const ctx = document.getElementById('ctx-menu');
   if (ctx) {
     const obs = new MutationObserver(() => {
@@ -338,9 +350,12 @@ function setup() {
         gsap.fromTo(ctx,
           { opacity: 0, y: -4, scale: 0.97 },
           { opacity: 1, y: 0, scale: 1, duration: TOKENS.dur.fast, ease: TOKENS.ease.smooth });
+      } else {
+        gsap.killTweensOf(ctx);
+        gsap.set(ctx, { clearProps: 'opacity,transform,scale,x,y' });
       }
     });
-    obs.observe(ctx, { attributes: true });
+    obs.observe(ctx, { attributes: true, attributeFilter: ['class'] });
   }
 
   // 9. Scrubber — when user releases, gentle catch-up (handled by editor.js if it opts in via MC.motion.scrubInertia)
