@@ -682,7 +682,15 @@ function applyCanvasFilter() {
 function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
 function drawTextLayer(l, t) {
-  if (!l.visible || t < l.start || t > l.end) return;
+  if (!l.visible) return;
+  // While paused, ALWAYS show selected layers at full opacity so the user
+  // can see what they're editing — even if the playhead is outside the
+  // layer's time range.
+  const selected = state.selectedIds.has(l.id) || state.selectedId === l.id;
+  const peek = selected && video?.paused;
+  if (!peek && (t < l.start || t > l.end)) return;
+  // For animation math, clamp time into the layer's range during peek
+  if (peek) t = Math.max(l.start, Math.min(l.end, l.start + (l.end - l.start) * 0.5));
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
   let alpha = (l.opacity ?? 1), dx = 0, dy = 0;
@@ -748,7 +756,10 @@ function drawTextLayer(l, t) {
 }
 
 function drawLogoLayer(l, t) {
-  if (!l.visible || t < l.start || t > l.end) return;
+  if (!l.visible) return;
+  const selected = state.selectedIds.has(l.id) || state.selectedId === l.id;
+  const peek = selected && video?.paused;
+  if (!peek && (t < l.start || t > l.end)) return;
   if (!l.img || !l.img.complete) return;
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
@@ -757,8 +768,11 @@ function drawLogoLayer(l, t) {
   ctx.restore();
 }
 
-function drawColorLayer(l) {
+function drawColorLayer(l, t) {
   if (!l.visible) return;
+  const selected = state.selectedIds.has(l.id) || state.selectedId === l.id;
+  const peek = selected && video?.paused;
+  if (!peek && (t < l.start || t > l.end)) return;
   ctx.save();
   ctx.globalCompositeOperation = l.blendMode || 'source-over';
   ctx.fillStyle = l.color; ctx.globalAlpha = l.opacity;
@@ -810,7 +824,7 @@ function draw() {
   for (const l of state.layers) {
     if (l.type === 'text')  drawTextLayer(l, t);
     else if (l.type === 'logo') drawLogoLayer(l, t);
-    else if (l.type === 'color') drawColorLayer(l);
+    else if (l.type === 'color') drawColorLayer(l, t);
   }
   if (state.fx.vignette) drawVignette();
   drawSelection();
@@ -879,6 +893,7 @@ function renderLayersPanel() {
     const hidden = !l.visible ? 'is-hidden' : '';
     return `
       <div class="layer-row ${active} ${hidden}" data-id="${l.id}">
+        <span class="layer-grip" title="Drag to reorder"><i data-lucide="grip-vertical"></i></span>
         <button class="layer-eye ${l.visible?'':'off'}" data-act="eye" title="Visibility">
           <i data-lucide="${l.visible?'eye':'eye-off'}"></i>
         </button>
@@ -900,9 +915,7 @@ function renderLayersPanel() {
       animation: 200,
       ghostClass: 'sortable-ghost',
       dragClass: 'sortable-drag',
-      handle: '.layer-row',
-      filter: 'button, .layer-name',
-      preventOnFilter: false,
+      handle: '.layer-grip',         // explicit drag handle = the grip icon
       onEnd: () => {
         // Read DOM order (top→bottom = visual top-of-stack), reverse to get array order
         const ids = [...layersPanelEl.querySelectorAll('.layer-row')].map(r => r.dataset.id);

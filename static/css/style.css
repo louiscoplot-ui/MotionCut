@@ -877,6 +877,18 @@ kbd {
   user-select: none;
   position: relative;
 }
+.layer-grip {
+  width: 14px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--tx-4);
+  cursor: grab;
+  opacity: 0;
+  transition: opacity var(--d-2) var(--ease-quart);
+  flex-shrink: 0;
+}
+.layer-row:hover .layer-grip { opacity: 1; }
+.layer-grip:active { cursor: grabbing; }
+.layer-grip [data-lucide] { width: 12px; height: 12px; }
 .layer-row:hover { background: var(--s-3); }
 .layer-row.active {
   background: var(--s-3);
