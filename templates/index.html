@@ -3,178 +3,286 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>MotionCut — Local Video Editor</title>
+<title>MotionCut — Cinematic editor</title>
+
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Orbitron:wght@500;700;900&family=Teko:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Bebas+Neue&family=Orbitron:wght@500;700;900&family=Teko:wght@400;500;600;700&family=Playfair+Display:wght@400;700&family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="logo-mark"></span>
-    <h1>MOTION<span>CUT</span></h1>
+<!-- ============= FULL-SCREEN DROP OVERLAY ============= -->
+<div id="drop-overlay" class="drop-overlay">
+  <div class="drop-overlay-inner">
+    <div class="drop-overlay-icon"><i data-lucide="upload-cloud"></i></div>
+    <div class="drop-overlay-title">Drop to import</div>
+    <div class="drop-overlay-sub">Video · image · audio</div>
   </div>
-  <div class="topbar-actions">
-    <button id="btn-undo"  class="ghost" title="Undo (Ctrl+Z)">↶ Undo</button>
-    <button id="btn-redo"  class="ghost" title="Redo (Ctrl+Y)">↷ Redo</button>
-    <button id="btn-save-project" class="ghost">Save Project</button>
-    <label class="ghost file-label" for="load-project">Load Project
+</div>
+
+<!-- ============= COMMAND PALETTE ============= -->
+<div id="cmdk-backdrop" class="cmdk-backdrop">
+  <div class="cmdk" role="dialog" aria-label="Command palette">
+    <div class="cmdk-input-row">
+      <i data-lucide="search" class="cmdk-icon"></i>
+      <input id="cmdk-input" type="text" placeholder="Type a command — try “export 9:16” or “grade teal”…" autocomplete="off" />
+      <kbd>esc</kbd>
+    </div>
+    <div id="cmdk-results" class="cmdk-results"></div>
+  </div>
+</div>
+
+<!-- ============= CONTEXT MENU ============= -->
+<div id="ctx-menu" class="ctx-menu" role="menu"></div>
+
+<!-- ============= TOPBAR ============= -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">
+      <span class="logo-mark"></span>
+      <h1>Motion<span>Cut</span></h1>
+    </div>
+    <div class="topbar-divider"></div>
+    <button id="cmdk-trigger" class="cmdk-trigger" title="Command palette (⌘K)">
+      <i data-lucide="search"></i>
+      <span>Search · run command</span>
+      <kbd>⌘ K</kbd>
+    </button>
+  </div>
+
+  <div class="topbar-right">
+    <button id="btn-undo"  class="ic-btn" title="Undo (⌘Z)"><i data-lucide="undo-2"></i></button>
+    <button id="btn-redo"  class="ic-btn" title="Redo (⌘Y)"><i data-lucide="redo-2"></i></button>
+    <div class="topbar-divider"></div>
+    <button id="btn-save-project" class="ic-btn" title="Save project"><i data-lucide="save"></i></button>
+    <label class="ic-btn" for="load-project" title="Load project">
+      <i data-lucide="folder-open"></i>
       <input type="file" id="load-project" accept="application/json" hidden />
     </label>
-    <span id="ffmpeg-status" class="pill">FFmpeg: …</span>
+    <div class="topbar-divider"></div>
+    <span id="ffmpeg-status" class="status-dot" title="FFmpeg status">
+      <span class="dot"></span><span class="lbl">FFmpeg</span>
+    </span>
   </div>
 </header>
 
+<!-- ============= LAYOUT: STAGE + RIGHT RAIL ============= -->
 <main class="layout">
 
-  <!-- ============================ LEFT SIDEBAR ============================ -->
-  <aside class="sidebar left">
-    <section class="panel">
-      <h2>Media</h2>
-      <div id="dropzone-video" class="dropzone">
-        <strong>Drop Video</strong>
-        <small>MP4 / MOV / WebM — up to 2GB</small>
-        <input type="file" id="file-video" accept="video/*" hidden />
-      </div>
-      <div id="dropzone-image" class="dropzone slim">
-        <strong>Drop Logo / PNG</strong>
-        <small>PNG / JPG</small>
-        <input type="file" id="file-image" accept="image/*" hidden />
-      </div>
-      <div id="dropzone-audio" class="dropzone slim">
-        <strong>Drop Music</strong>
-        <small>MP3 / WAV</small>
-        <input type="file" id="file-audio" accept="audio/*" hidden />
-      </div>
-    </section>
+  <!-- ===== STAGE COLUMN ===== -->
+  <section class="stage-col">
 
-    <section class="panel">
-      <h2>Add Layer</h2>
-      <button id="btn-add-text"  class="primary block">+ Text Layer</button>
-      <button id="btn-add-logo"  class="block ghost">+ Logo / Image</button>
-      <button id="btn-add-color" class="block ghost">+ Color Overlay</button>
-    </section>
-
-    <section class="panel">
-      <h2>Layer Properties</h2>
-      <div id="layer-props" class="layer-props">
-        <p class="muted">Select a layer on the canvas to edit.</p>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Effects</h2>
-      <label class="row"><input type="checkbox" id="fx-vignette" /> Vignette</label>
-      <label class="row"><input type="checkbox" id="fx-grain" /> Film Grain</label>
-      <label class="row col">
-        <span>Color Grade</span>
-        <select id="fx-grade">
-          <option value="natural">Natural</option>
-          <option value="cinematic">Cinematic</option>
-          <option value="teal_orange">Teal & Orange</option>
-          <option value="moody_dark">Moody Dark</option>
-          <option value="bright_airy">Bright Airy</option>
-          <option value="bw">Black &amp; White</option>
-        </select>
-      </label>
-    </section>
-
-    <section class="panel">
-      <h2>Music</h2>
-      <div id="music-info" class="muted small">No music loaded.</div>
-      <label class="row col">
-        <span>Volume <em id="music-vol-label">60%</em></span>
-        <input type="range" id="music-volume" min="0" max="100" value="60" />
-      </label>
-      <label class="row"><input type="checkbox" id="music-fadein" /> Fade in</label>
-      <label class="row"><input type="checkbox" id="music-fadeout" /> Fade out</label>
-      <label class="row col">
-        <span>Mode</span>
-        <select id="music-mode">
-          <option value="mix">Mix with original</option>
-          <option value="replace">Replace original</option>
-        </select>
-      </label>
-    </section>
-  </aside>
-
-  <!-- ============================== CENTER STAGE ========================== -->
-  <section class="stage">
     <div class="stage-toolbar">
-      <button id="btn-play" class="play">▶</button>
-      <span id="time-display" class="mono">00:00 / 00:00</span>
-      <div class="aspect-toggle">
-        <button class="aspect on" data-aspect="16:9">16:9</button>
-        <button class="aspect"     data-aspect="9:16">9:16</button>
+      <button id="btn-play" class="play-btn" title="Play / Pause (Space)">
+        <i data-lucide="play" id="play-icon"></i>
+      </button>
+
+      <span id="time-display" class="timecode">00:00 / 00:00</span>
+
+      <div class="aspect-segmented" role="tablist">
+        <button class="aspect on" data-aspect="16:9" role="tab">16:9</button>
+        <button class="aspect"     data-aspect="1:1"  role="tab">1:1</button>
+        <button class="aspect"     data-aspect="9:16" role="tab">9:16</button>
       </div>
-      <button id="btn-delete-layer" class="ghost danger" title="Delete selected (Del)">🗑 Delete Layer</button>
+
+      <div class="grow"></div>
+
+      <button class="ic-btn ghost" id="btn-fit"  title="Fit to screen"><i data-lucide="maximize-2"></i></button>
+      <button class="ic-btn ghost" id="btn-mute" title="Mute"><i data-lucide="volume-2"></i></button>
     </div>
 
     <div id="stage-wrap" class="stage-wrap aspect-16-9">
+      <div id="stage-empty" class="stage-empty">
+        <div class="stage-empty-icon"><i data-lucide="film"></i></div>
+        <div class="stage-empty-title">Drop your footage anywhere</div>
+        <div class="stage-empty-sub">MP4 · MOV · WebM — up to 2GB · 100% local</div>
+        <button class="btn-quiet" id="stage-empty-pick">
+          <i data-lucide="file-video-2"></i> Or browse files
+        </button>
+      </div>
+
       <div id="stage-inner" class="stage-inner">
         <video id="video" playsinline></video>
         <canvas id="canvas"></canvas>
+
+        <!-- Floating canvas toolbar (appears on selection) -->
+        <div id="canvas-floating" class="canvas-floating hidden">
+          <button data-action="duplicate" title="Duplicate"><i data-lucide="copy"></i></button>
+          <button data-action="bring-front" title="Bring to front"><i data-lucide="chevrons-up"></i></button>
+          <button data-action="send-back" title="Send to back"><i data-lucide="chevrons-down"></i></button>
+          <span class="cf-divider"></span>
+          <button data-action="lock" title="Lock"><i data-lucide="lock"></i></button>
+          <button data-action="hide" title="Hide"><i data-lucide="eye-off"></i></button>
+          <span class="cf-divider"></span>
+          <button data-action="delete" class="danger" title="Delete"><i data-lucide="trash-2"></i></button>
+        </div>
+
+        <!-- Snap guides -->
+        <svg id="snap-svg" class="snap-svg" viewBox="0 0 1920 1080" preserveAspectRatio="none"></svg>
+
+        <!-- Drag tooltip (X/Y while dragging) -->
+        <div id="drag-tooltip" class="drag-tooltip hidden"></div>
       </div>
     </div>
 
-    <div class="timeline-wrap">
-      <input type="range" id="scrubber" min="0" max="1000" value="0" step="1" />
-      <div id="timeline-ticks" class="timeline-ticks"></div>
+    <!-- Timeline -->
+    <div class="timeline">
+      <div class="timeline-rail">
+        <input type="range" id="scrubber" min="0" max="1000" value="0" step="1" />
+      </div>
+      <div class="timeline-meta">
+        <span class="mono">00:00</span>
+        <span class="muted small">timeline</span>
+        <span class="mono" id="time-end">00:00</span>
+      </div>
     </div>
 
   </section>
 
-  <!-- ============================ RIGHT SIDEBAR =========================== -->
-  <aside class="sidebar right">
+  <!-- ===== RIGHT RAIL ===== -->
+  <aside class="rail">
+
+    <!-- ===== MEDIA ===== -->
     <section class="panel">
       <div class="panel-head">
-        <h2>Layers</h2>
-        <div class="layer-actions">
-          <button id="btn-layer-dup"   class="icon-btn" title="Duplicate">⧉</button>
-          <button id="btn-layer-up"    class="icon-btn" title="Bring forward">▲</button>
-          <button id="btn-layer-down"  class="icon-btn" title="Send backward">▼</button>
-        </div>
+        <h2><i data-lucide="upload" class="head-icon"></i>Media</h2>
       </div>
-      <div id="layers-panel" class="layers-panel">
-        <div class="layers-empty muted small">No layers yet.<br>Add one from the left.</div>
+      <div id="dropzone-video" class="dropzone hero">
+        <i data-lucide="film" class="dz-icon"></i>
+        <div class="dz-title">Video</div>
+        <div class="dz-sub">MP4 · MOV · WebM</div>
+        <input type="file" id="file-video" accept="video/*" hidden />
+      </div>
+      <div class="dz-row">
+        <div id="dropzone-image" class="dropzone slim">
+          <i data-lucide="image" class="dz-icon"></i>
+          <div class="dz-title">Logo</div>
+          <input type="file" id="file-image" accept="image/*" hidden />
+        </div>
+        <div id="dropzone-audio" class="dropzone slim">
+          <i data-lucide="music" class="dz-icon"></i>
+          <div class="dz-title">Music</div>
+          <input type="file" id="file-audio" accept="audio/*" hidden />
+        </div>
       </div>
     </section>
 
+    <!-- ===== LAYERS ===== -->
     <section class="panel">
-      <h2>Templates</h2>
+      <div class="panel-head">
+        <h2><i data-lucide="layers" class="head-icon"></i>Layers</h2>
+        <div class="head-actions">
+          <button id="btn-add-text"  class="ic-btn xs" title="Add text (T)"><i data-lucide="type"></i></button>
+          <button id="btn-add-logo"  class="ic-btn xs" title="Add image (L)"><i data-lucide="image-plus"></i></button>
+          <button id="btn-add-color" class="ic-btn xs" title="Add overlay (O)"><i data-lucide="square"></i></button>
+        </div>
+      </div>
+      <div id="layers-panel" class="layers-panel">
+        <div class="layers-empty">
+          <i data-lucide="square-stack" class="empty-icon"></i>
+          <div>No layers yet</div>
+          <div class="muted small">Add text, logo, or overlay above</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== INSPECTOR (contextual) ===== -->
+    <section class="panel" id="inspector-panel">
+      <div class="panel-head">
+        <h2><i data-lucide="sliders-horizontal" class="head-icon"></i><span id="inspector-title">Inspector</span></h2>
+      </div>
+      <div id="layer-props" class="inspector-body">
+        <div class="inspector-empty">
+          <i data-lucide="mouse-pointer-2" class="empty-icon"></i>
+          <div class="muted small">Select a layer to edit</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== STYLE (project-level) ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="palette" class="head-icon"></i>Style</h2>
+      </div>
+
+      <div class="style-section-label">Color grade</div>
+      <div class="grade-grid" id="grade-grid">
+        <button class="grade-chip on"  data-grade="natural"><span>Natural</span></button>
+        <button class="grade-chip"     data-grade="cinematic"><span>Cinematic</span></button>
+        <button class="grade-chip"     data-grade="teal_orange"><span>Teal · Orange</span></button>
+        <button class="grade-chip"     data-grade="moody_dark"><span>Moody</span></button>
+        <button class="grade-chip"     data-grade="bright_airy"><span>Airy</span></button>
+        <button class="grade-chip"     data-grade="bw"><span>B&amp;W</span></button>
+      </div>
+
+      <div class="style-section-label">FX</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="fx-vignette" /><span>Vignette</span></label>
+        <label class="toggle"><input type="checkbox" id="fx-grain" /><span>Film grain</span></label>
+      </div>
+
+      <div class="style-section-label">Music</div>
+      <div id="music-block">
+        <div id="music-info" class="music-info">
+          <i data-lucide="music-2"></i>
+          <span class="muted small">No music loaded</span>
+        </div>
+        <label class="row col">
+          <span>Volume <em id="music-vol-label">60%</em></span>
+          <input type="range" id="music-volume" min="0" max="100" value="60" />
+        </label>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="music-fadein" /><span>Fade in</span></label>
+          <label class="toggle"><input type="checkbox" id="music-fadeout" /><span>Fade out</span></label>
+        </div>
+        <label class="row col">
+          <span>Mix mode</span>
+          <select id="music-mode">
+            <option value="mix">Mix with original</option>
+            <option value="replace">Replace original</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <!-- ===== TEMPLATES ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="sparkles" class="head-icon"></i>Templates</h2>
+      </div>
       <div class="templates">
         <button class="tpl" data-template="cinematic">
-          <span class="tpl-thumb cinematic">FILM</span>
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">FILM</span></span>
           <span class="tpl-info">
             <span class="tpl-name">Cinematic</span>
             <span class="tpl-desc">Letterbox · vignette · fade title</span>
           </span>
         </button>
         <button class="tpl" data-template="real_estate">
-          <span class="tpl-thumb real_estate">$1.4M</span>
+          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">$1.4M</span></span>
           <span class="tpl-info">
             <span class="tpl-name">Real Estate</span>
             <span class="tpl-desc">Drone reveal · price tag</span>
           </span>
         </button>
         <button class="tpl" data-template="travel">
-          <span class="tpl-thumb travel">📍</span>
+          <span class="tpl-thumb travel"><span class="tpl-thumb-text">◷</span></span>
           <span class="tpl-info">
             <span class="tpl-name">Travel</span>
             <span class="tpl-desc">Full-width title reveal</span>
           </span>
         </button>
         <button class="tpl" data-template="social">
-          <span class="tpl-thumb social">9:16</span>
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">9:16</span></span>
           <span class="tpl-info">
             <span class="tpl-name">Social</span>
             <span class="tpl-desc">Reels · TikTok · bold</span>
           </span>
         </button>
         <button class="tpl" data-template="corporate">
-          <span class="tpl-thumb corporate">ACME</span>
+          <span class="tpl-thumb corporate"><span class="tpl-thumb-text">ACME</span></span>
           <span class="tpl-info">
             <span class="tpl-name">Corporate</span>
             <span class="tpl-desc">Clean · minimal · gold rule</span>
@@ -183,10 +291,21 @@
       </div>
     </section>
 
-    <section class="panel">
-      <h2>Export</h2>
-      <button id="btn-export-169" class="primary block">⬇ Export 16:9 — 1920×1080</button>
-      <button id="btn-export-916" class="primary block">⬇ Export 9:16 — 1080×1920</button>
+    <!-- ===== EXPORT ===== -->
+    <section class="panel export-panel">
+      <div class="panel-head">
+        <h2><i data-lucide="download" class="head-icon"></i>Export</h2>
+      </div>
+      <button id="btn-export-169" class="cta block">
+        <i data-lucide="monitor"></i>
+        <span>Export 16:9</span>
+        <span class="cta-sub">1920 × 1080</span>
+      </button>
+      <button id="btn-export-916" class="cta-outline block">
+        <i data-lucide="smartphone"></i>
+        <span>Export 9:16</span>
+        <span class="cta-sub">1080 × 1920</span>
+      </button>
 
       <div id="export-progress" class="export-progress hidden">
         <div class="bar"><div id="export-bar" class="bar-fill"></div></div>
@@ -194,24 +313,28 @@
       </div>
 
       <div id="export-done" class="export-done hidden">
-        <a id="export-link" href="#" download>⤓ Download MP4</a>
+        <a id="export-link" href="#" download>
+          <i data-lucide="check-circle-2"></i>
+          <span>Download MP4</span>
+        </a>
       </div>
     </section>
 
-    <section class="panel">
-      <h2>Shortcuts</h2>
-      <ul class="kbd-list">
-        <li><kbd>Space</kbd> Play / pause</li>
-        <li><kbd>←</kbd> / <kbd>→</kbd> Step 1 frame</li>
-        <li><kbd>Del</kbd> Remove selected layer</li>
-        <li><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd> Undo / redo</li>
-      </ul>
-    </section>
   </aside>
 </main>
 
+<!-- Toast -->
 <div id="toast" class="toast hidden"></div>
 
+<!-- Lucide icons (CDN) -->
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<!-- SortableJS for layer reordering -->
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<!-- GSAP motion engine -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+
+<script src="{{ url_for('static', filename='js/motion.js') }}"></script>
 <script src="{{ url_for('static', filename='js/editor.js') }}"></script>
+<script>if (window.lucide) lucide.createIcons();</script>
 </body>
 </html>
