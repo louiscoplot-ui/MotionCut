@@ -204,16 +204,51 @@ function redo() {
 // ============================================================
 //  Upload
 // ============================================================
-async function uploadFile(file, kind) {
-  const fd = new FormData();
-  fd.append('file', file);
-  fd.append('kind', kind);
-  const r = await fetch('/api/upload', { method: 'POST', body: fd });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `upload failed (${r.status})`);
+const CHUNK_THRESHOLD = 25 * 1024 * 1024;   // > 25 MB → chunked
+const CHUNK_SIZE      = 20 * 1024 * 1024;   // 20 MB per chunk (under proxy caps)
+
+async function uploadFile(file, kind, onProgress) {
+  if (file.size <= CHUNK_THRESHOLD) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('kind', kind);
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `upload failed (${r.status})`);
+    }
+    return r.json();
   }
-  return r.json();
+  return uploadFileChunked(file, kind, onProgress);
+}
+
+async function uploadFileChunked(file, kind, onProgress) {
+  const uploadId = 'u_' + Math.random().toString(36).slice(2, 12)
+                       + Math.random().toString(36).slice(2, 8);
+  const total = Math.ceil(file.size / CHUNK_SIZE);
+  let last = null;
+
+  for (let i = 0; i < total; i++) {
+    const start = i * CHUNK_SIZE;
+    const end   = Math.min(file.size, start + CHUNK_SIZE);
+    const blob  = file.slice(start, end);
+    const fd = new FormData();
+    fd.append('uploadId', uploadId);
+    fd.append('chunkIndex', i);
+    fd.append('totalChunks', total);
+    fd.append('filename', file.name);
+    fd.append('kind', kind);
+    fd.append('chunk', blob, 'chunk');
+
+    const r = await fetch('/api/upload/chunk', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || `chunk ${i+1}/${total} failed (${r.status})`);
+    }
+    last = await r.json();
+    if (onProgress) onProgress(((i + 1) / total) * 100);
+  }
+  return last;
 }
 
 function bindDropzone(zoneId, inputId, kind, onUploaded) {
@@ -232,7 +267,9 @@ function bindDropzone(zoneId, inputId, kind, onUploaded) {
   async function handle(file) {
     try {
       toast(`Uploading ${file.name}…`, 60000);
-      const meta = await uploadFile(file, kind);
+      const meta = await uploadFile(file, kind, (pct) => {
+        toast(`Uploading ${file.name} — ${pct.toFixed(0)}%`, 60000);
+      });
       zone.classList.add('has-file');
       zone.querySelector('strong').textContent = file.name;
       toast(`Loaded ${file.name}`);

@@ -25,8 +25,10 @@ from flask_cors import CORS
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 EXPORT_DIR = BASE_DIR / "exports"
+TMP_DIR    = UPLOAD_DIR / ".chunks"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_VIDEO = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 ALLOWED_IMAGE = {".png", ".jpg", ".jpeg", ".webp"}
@@ -190,6 +192,71 @@ def upload():
     fname = f"{fid}_{safe_name(f.filename)}"
     out_path = UPLOAD_DIR / fname
     f.save(str(out_path))
+
+    duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
+
+    return jsonify({
+        "ok": True,
+        "id": fid,
+        "filename": fname,
+        "kind": kind,
+        "url": url_for("serve_upload", filename=fname),
+        "duration": duration,
+        "size": out_path.stat().st_size,
+    })
+
+
+@app.route("/api/upload/chunk", methods=["POST"])
+def upload_chunk():
+    """
+    Chunked upload to bypass reverse-proxy body-size limits (Codespaces, etc.).
+    Form fields: uploadId, chunkIndex, totalChunks, filename, kind, chunk(file)
+    On the final chunk we assemble, probe duration, and return the same shape
+    as /api/upload.
+    """
+    upload_id = request.form.get("uploadId", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", upload_id):
+        return jsonify({"error": "bad uploadId"}), 400
+    try:
+        idx = int(request.form.get("chunkIndex", "-1"))
+        total = int(request.form.get("totalChunks", "0"))
+    except ValueError:
+        return jsonify({"error": "bad chunk index"}), 400
+    if idx < 0 or total <= 0 or idx >= total:
+        return jsonify({"error": "bad chunk range"}), 400
+
+    chunk = request.files.get("chunk")
+    if not chunk:
+        return jsonify({"error": "no chunk"}), 400
+
+    part_path = TMP_DIR / f"{upload_id}.part"
+    # Append chunks in order. We require client to send sequentially.
+    with open(part_path, "ab") as f:
+        chunk.save(f)
+
+    if idx < total - 1:
+        return jsonify({"ok": True, "received": idx + 1, "of": total})
+
+    # Final chunk: finalize
+    filename = request.form.get("filename", "upload.bin")
+    ext = Path(filename).suffix.lower()
+    kind = request.form.get("kind", "auto")
+    if kind == "auto":
+        if ext in ALLOWED_VIDEO: kind = "video"
+        elif ext in ALLOWED_IMAGE: kind = "image"
+        elif ext in ALLOWED_AUDIO: kind = "audio"
+        else:
+            part_path.unlink(missing_ok=True)
+            return jsonify({"error": f"unsupported extension {ext}"}), 400
+    allowed = {"video": ALLOWED_VIDEO, "image": ALLOWED_IMAGE, "audio": ALLOWED_AUDIO}[kind]
+    if ext not in allowed:
+        part_path.unlink(missing_ok=True)
+        return jsonify({"error": f"{ext} not allowed for {kind}"}), 400
+
+    fid = uuid.uuid4().hex[:12]
+    fname = f"{fid}_{safe_name(filename)}"
+    out_path = UPLOAD_DIR / fname
+    shutil.move(str(part_path), str(out_path))
 
     duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
 
