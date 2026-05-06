@@ -369,28 +369,58 @@ async function detectBeats(url) {
 // ============================================================
 function bindDropOverlay() {
   const overlay = $('drop-overlay');
-  let hideTimer = null;
 
-  // Show overlay whenever a file is being dragged anywhere over the window.
-  // Re-armed on every dragover so it stays visible while the cursor moves.
+  const show = () => overlay.classList.add('show');
+  const hide = () => overlay.classList.remove('show');
+
+  // dragenter/leave fire many times as the cursor crosses child boundaries.
+  // We debounce hide via a small timeout that's canceled by any new enter/over.
+  let leaveTimer = null;
+  const scheduleHide = (ms = 60) => {
+    clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(hide, ms);
+  };
+  const cancelHide = () => clearTimeout(leaveTimer);
+
+  // Show on first dragenter that carries files
+  window.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    cancelHide();
+    show();
+  });
+
+  // dragover is required to enable drop, and keeps the overlay alive
   window.addEventListener('dragover', (e) => {
     if (!e.dataTransfer?.types?.includes('Files')) return;
     e.preventDefault();
-    overlay.classList.add('show');
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => overlay.classList.remove('show'), 250);
+    cancelHide();
   });
 
-  // Hard reset on any drop — capture phase, fires before the per-zone handlers.
-  // Per-zone handlers still run (overlay has pointer-events:none, so the drop
-  // hits the actual dropzone underneath).
+  // When the cursor leaves the document or stops carrying files, schedule hide
+  window.addEventListener('dragleave', (e) => {
+    // Only count "leaving the window" leaves to avoid flicker on inner elements
+    if (e.relatedTarget == null && (e.clientX <= 0 || e.clientY <= 0
+        || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight)) {
+      scheduleHide(0);
+    } else {
+      scheduleHide(80);
+    }
+  });
+
+  // ALWAYS hide on drop (capture phase, fires before per-zone handlers)
   document.addEventListener('drop', () => {
-    clearTimeout(hideTimer);
-    overlay.classList.remove('show');
+    cancelHide();
+    hide();
   }, true);
 
-  // Auto-handle drops not absorbed by any dropzone (auto-detect by extension).
-  // Per-zone handlers call stopPropagation, so this only runs for "drop anywhere" cases.
+  // Hide on dragend (release outside any drop target)
+  window.addEventListener('dragend', () => { cancelHide(); hide(); }, true);
+
+  // Hide if the page loses focus mid-drag (e.g. user switches window)
+  window.addEventListener('blur', () => { cancelHide(); hide(); });
+
+  // Auto-handle drops not absorbed by a per-zone dropzone (auto-detect by extension).
+  // Per-zone handlers call stopPropagation, so this only runs for "drop anywhere".
   window.addEventListener('drop', async (e) => {
     e.preventDefault();
     const files = [...(e.dataTransfer?.files || [])];
