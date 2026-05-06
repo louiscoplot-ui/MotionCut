@@ -127,17 +127,8 @@
       </div>
     </div>
 
-    <!-- Timeline -->
-    <div class="timeline">
-      <div class="timeline-rail">
-        <input type="range" id="scrubber" min="0" max="1000" value="0" step="1" />
-      </div>
-      <div class="timeline-meta">
-        <span class="mono">00:00</span>
-        <span class="muted small">timeline</span>
-        <span class="mono" id="time-end">00:00</span>
-      </div>
-    </div>
+    <!-- Timeline (mounted by timeline.js) -->
+    <div class="timeline-host" id="timeline-host"></div>
 
   </section>
 
@@ -334,6 +325,7 @@
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 
 <script src="{{ url_for('static', filename='js/motion.js') }}"></script>
+<script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
 <script src="{{ url_for('static', filename='js/editor.js') }}"></script>
 <script>if (window.lucide) lucide.createIcons();</script>
 </body>

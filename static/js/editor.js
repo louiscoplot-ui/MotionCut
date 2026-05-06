@@ -263,8 +263,8 @@ function applyVideo(meta) {
   video.onloadedmetadata = () => {
     state.layers.forEach(l => { if (l.end > 9000) l.end = video.duration; });
     if (stageEmpty) stageEmpty.classList.add('hidden');
-    $('time-end') && ($('time-end').textContent = fmtTime(video.duration));
     draw();
+    try { window.MC?.timeline?.render?.(); } catch {}
   };
   $('dropzone-video').classList.add('has-file');
   $('dropzone-video').querySelector('.dz-title').textContent = meta.filename.slice(0,18);
@@ -291,6 +291,7 @@ function applyMusic(meta) {
   mi.classList.add('has-file');
   mi.querySelector('span').textContent = meta.filename + ' · ' + fmtTime(meta.duration||0);
   mi.querySelector('span').classList.remove('muted');
+  try { window.MC?.timeline?.render?.(); } catch {}
 }
 
 // ============================================================
@@ -655,9 +656,11 @@ function draw() {
 function loop() {
   draw();
   if (video.duration > 0) {
-    const p = (video.currentTime / video.duration) * 1000;
-    scrubber.value = p;
-    scrubber.style.setProperty('--p', (p/10).toFixed(1) + '%');
+    if (scrubber) {
+      const p = (video.currentTime / video.duration) * 1000;
+      scrubber.value = p;
+      scrubber.style.setProperty('--p', (p/10).toFixed(1) + '%');
+    }
     $('time-display').textContent =
       `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
   }
@@ -689,7 +692,12 @@ function typeIcon(t) {
 }
 function typeClass(t) { return 't-' + t; }
 
+function tlRender() {
+  try { window.MC?.timeline?.render?.(); } catch {}
+}
+
 function renderLayersPanel() {
+  tlRender();
   const empty = state.layers.length === 0;
   if (empty) {
     layersPanelEl.innerHTML = `
@@ -1335,13 +1343,26 @@ function init() {
   stageWrap    = $('stage-wrap');
   stageInner   = $('stage-inner');
   stageEmpty   = $('stage-empty');
-  scrubber     = $('scrubber');
+  scrubber     = $('scrubber');           // may be null (legacy)
   layersPanelEl   = $('layers-panel');
   inspectorBodyEl = $('layer-props');
   snapSvg      = $('snap-svg');
   dragTooltip  = $('drag-tooltip');
   canvasFloatingEl = $('canvas-floating');
   toastEl      = $('toast');
+
+  // Expose editor API for sibling modules (timeline.js)
+  window.MC = window.MC || {};
+  window.MC.editor = {
+    state, video, draw,
+    renderInspector, renderLayersPanel,
+    snapshot,
+    addText: addTextQuick,
+    addColor: addColorQuick,
+    deleteLayer, duplicateLayer,
+    bringToFront, sendToBack,
+    toggleVisibility, toggleLock,
+  };
 
   // Health check
   fetch('/api/health').then(r=>r.json()).then(j => {
@@ -1392,9 +1413,11 @@ function init() {
   $('btn-play').addEventListener('click', togglePlay);
   video.addEventListener('play',  () => $('play-icon').setAttribute('data-lucide','pause') || refreshIcons());
   video.addEventListener('pause', () => $('play-icon').setAttribute('data-lucide','play')  || refreshIcons());
-  scrubber.addEventListener('input', () => {
-    if (video.duration > 0) video.currentTime = (scrubber.value/1000) * video.duration;
-  });
+  if (scrubber) {
+    scrubber.addEventListener('input', () => {
+      if (video.duration > 0) video.currentTime = (scrubber.value/1000) * video.duration;
+    });
+  }
 
   // Mute toggle
   $('btn-mute').addEventListener('click', () => {
@@ -1463,6 +1486,12 @@ function init() {
   // Snapshot baseline + start render loop
   snapshot();
   refreshIcons();
+
+  // Init the multi-track timeline once editor API is published
+  try {
+    window.MC?.timeline?.init?.(window.MC.editor);
+  } catch (e) { console.warn('[editor] timeline init failed', e); }
+
   loop();
 }
 
