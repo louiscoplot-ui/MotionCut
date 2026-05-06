@@ -29,10 +29,15 @@ const state = {
   aspect: '16:9',
   layers: [],
   selectedId: null,
+  selectedIds: new Set(),       // multi-select set; selectedId remains the "primary"
   template: 'custom',
   fx:    { vignette: false, grain: false, grade: 'natural' },
   music: { volume: 60, fadeIn: false, fadeOut: false, mode: 'mix' },
   letterbox: false,
+  inMark:  null,                // null = use video start
+  outMark: null,                // null = use video end
+  beats:   [],                  // detected beat positions (seconds)
+  snapToBeat: false,
 };
 
 const history = { stack: [], idx: -1, max: 60 };
@@ -285,6 +290,7 @@ function applyLogo(meta) {
 }
 function applyMusic(meta) {
   state.audio = meta;
+  state.beats = [];
   $('dropzone-audio').classList.add('has-file');
   $('dropzone-audio').querySelector('.dz-title').textContent = 'Music set';
   const mi = $('music-info');
@@ -292,6 +298,61 @@ function applyMusic(meta) {
   mi.querySelector('span').textContent = meta.filename + ' · ' + fmtTime(meta.duration||0);
   mi.querySelector('span').classList.remove('muted');
   try { window.MC?.timeline?.render?.(); } catch {}
+  // Auto-detect beats in the background (non-blocking)
+  detectBeats(meta.url);
+}
+
+async function detectBeats(url) {
+  try {
+    toast('Detecting beats…', { ms: 60000 });
+    const buf = await fetch(url).then(r => r.arrayBuffer());
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await ac.decodeAudioData(buf);
+    const ch = decoded.getChannelData(0);
+    const sr = decoded.sampleRate;
+    // Energy onset: frame the signal in 1024-sample windows, compute energy,
+    // detect local maxima above adaptive threshold.
+    const win = 1024;
+    const hop = 512;
+    const frames = Math.floor((ch.length - win) / hop);
+    const energy = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      let e = 0;
+      const start = i * hop;
+      for (let j = 0; j < win; j++) {
+        const v = ch[start + j];
+        e += v * v;
+      }
+      energy[i] = Math.sqrt(e / win);
+    }
+    // Smooth + flux
+    const flux = new Float32Array(frames);
+    for (let i = 1; i < frames; i++) {
+      flux[i] = Math.max(0, energy[i] - energy[i-1] * 1.05);
+    }
+    // Adaptive threshold via local mean
+    const beats = [];
+    const localWin = 24;     // ~0.55 s
+    const minGapFrames = Math.floor(0.30 * sr / hop);  // 300ms minimum between beats
+    let lastBeat = -minGapFrames;
+    for (let i = localWin; i < frames - localWin; i++) {
+      let mean = 0;
+      for (let k = i - localWin; k < i + localWin; k++) mean += flux[k];
+      mean /= (localWin * 2);
+      const thresh = mean * 1.6 + 0.005;
+      if (flux[i] > thresh && flux[i] >= flux[i-1] && flux[i] >= flux[i+1] && (i - lastBeat) >= minGapFrames) {
+        beats.push((i * hop) / sr);
+        lastBeat = i;
+      }
+    }
+    state.beats = beats;
+    try { ac.close(); } catch {}
+    toast(`Detected ${beats.length} beats`, { gold:true });
+    try { window.MC?.timeline?.render?.(); } catch {}
+  } catch (e) {
+    console.warn('[beats]', e);
+    toast('Beat detection failed');
+  }
 }
 
 // ============================================================
@@ -444,8 +505,24 @@ function showDragTooltip(e, l) {
 }
 function hideDragTooltip() { if (dragTooltip) dragTooltip.classList.add('hidden'); }
 
+function selectOnly(id) {
+  state.selectedId = id;
+  state.selectedIds.clear();
+  if (id) state.selectedIds.add(id);
+}
+function selectAdd(id) {
+  if (!id) return;
+  if (state.selectedIds.has(id) && state.selectedIds.size > 1) {
+    state.selectedIds.delete(id);
+    if (state.selectedId === id) state.selectedId = [...state.selectedIds][state.selectedIds.size - 1] || null;
+  } else {
+    state.selectedIds.add(id);
+    state.selectedId = id;
+  }
+}
+
 function onCanvasMouseDown(e) {
-  if (e.button === 2) return; // context menu handles right-click
+  if (e.button === 2) return;
   const { x, y } = canvasCoordsFromEvent(e);
   let hit = null, mode = 'move';
   for (let i = state.layers.length - 1; i >= 0; i--) {
@@ -455,7 +532,9 @@ function onCanvasMouseDown(e) {
     if (pointInLayer(x, y, l)) { hit = l; mode = 'move'; break; }
   }
   if (hit) {
-    state.selectedId = hit.id;
+    if (e.shiftKey) selectAdd(hit.id);
+    else if (!state.selectedIds.has(hit.id)) selectOnly(hit.id);
+    else state.selectedId = hit.id;
     const b = getLayerBounds(hit);
     drag = {
       id: hit.id, mode,
@@ -464,9 +543,14 @@ function onCanvasMouseDown(e) {
       startW: hit.width || b.w, startH: hit.height || b.h,
       anchorX: b.x, anchorY: b.y,
       origMouse: { x, y },
+      // Snapshot of all selected layers' starting positions for group move
+      groupStarts: [...state.selectedIds].map(sid => {
+        const sl = state.layers.find(L => L.id === sid);
+        return sl ? { id: sid, x: sl.x, y: sl.y } : null;
+      }).filter(Boolean),
     };
-  } else {
-    state.selectedId = null;
+  } else if (!e.shiftKey) {
+    selectOnly(null);
   }
   renderLayersPanel(); renderInspector(); positionFloatingToolbar(); draw();
 }
@@ -488,8 +572,25 @@ function onCanvasMouseMove(e) {
     const targetX = drag.startX + dx;
     const targetY = drag.startY + dy;
     const snap = applySnap(l, targetX - l.x, targetY - l.y);
-    l.x = clamp(l.x + snap.dx, 0, canvasW);
-    l.y = clamp(l.y + snap.dy, 0, canvasH);
+    const realDx = snap.dx, realDy = snap.dy;
+    // Apply to all selected layers (group move)
+    if (drag.groupStarts && drag.groupStarts.length > 1) {
+      const totalDx = (drag.startX + realDx) - drag.startX;
+      const totalDy = (drag.startY + realDy) - drag.startY;
+      const moved = (drag.startX + dx + (snap.dx - dx)) - drag.startX;
+      const movedY = (drag.startY + dy + (snap.dy - dy)) - drag.startY;
+      drag.groupStarts.forEach(g => {
+        if (g.id === l.id) return;
+        const sl = state.layers.find(L => L.id === g.id); if (!sl) return;
+        sl.x = clamp(g.x + moved,  0, canvasW);
+        sl.y = clamp(g.y + movedY, 0, canvasH);
+      });
+      l.x = clamp(drag.startX + moved,  0, canvasW);
+      l.y = clamp(drag.startY + movedY, 0, canvasH);
+    } else {
+      l.x = clamp(l.x + realDx, 0, canvasW);
+      l.y = clamp(l.y + realDy, 0, canvasH);
+    }
     drawSnapGuides(snap.guides);
     showDragTooltip(e, l);
   } else if (drag.mode === 'resize') {
@@ -623,19 +724,25 @@ function drawVignette() {
   ctx.save(); ctx.fillStyle = g; ctx.fillRect(0,0,canvasW,canvasH); ctx.restore();
 }
 function drawSelection() {
-  const sel = state.layers.find(l => l.id === state.selectedId);
-  if (!sel || !sel.visible) return;
-  const b = getLayerBounds(sel);
+  // Outline every selected layer (multi-select aware)
+  const ids = state.selectedIds.size ? state.selectedIds : (state.selectedId ? new Set([state.selectedId]) : new Set());
+  if (!ids.size) return;
   ctx.save();
-  ctx.strokeStyle = '#f0c040'; ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 4]);
-  ctx.strokeRect(b.x, b.y, b.w, b.h);
-  ctx.setLineDash([]);
-  // 4 corner handles
-  ctx.fillStyle = '#f0c040';
-  const corners = [[b.x,b.y],[b.x+b.w,b.y],[b.x,b.y+b.h],[b.x+b.w,b.y+b.h]];
-  for (const [cx,cy] of corners) {
-    ctx.fillRect(cx - HANDLE/2, cy - HANDLE/2, HANDLE, HANDLE);
+  for (const id of ids) {
+    const l = state.layers.find(x => x.id === id);
+    if (!l || !l.visible) continue;
+    const b = getLayerBounds(l);
+    const isPrimary = (l.id === state.selectedId);
+    ctx.strokeStyle = isPrimary ? '#f0c040' : 'rgba(240,192,64,0.55)';
+    ctx.lineWidth   = isPrimary ? 1.5 : 1;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.setLineDash([]);
+    if (isPrimary) {
+      ctx.fillStyle = '#f0c040';
+      const corners = [[b.x,b.y],[b.x+b.w,b.y],[b.x,b.y+b.h],[b.x+b.w,b.y+b.h]];
+      for (const [cx,cy] of corners) ctx.fillRect(cx - HANDLE/2, cy - HANDLE/2, HANDLE, HANDLE);
+    }
   }
   ctx.restore();
 }
@@ -711,7 +818,7 @@ function renderLayersPanel() {
   }
   // Render top→bottom = top of z-stack first (last in array)
   const rows = [...state.layers].reverse().map(l => {
-    const active = l.id === state.selectedId ? 'active' : '';
+    const active = (state.selectedIds.has(l.id) || l.id === state.selectedId) ? 'active' : '';
     const hidden = !l.visible ? 'is-hidden' : '';
     return `
       <div class="layer-row ${active} ${hidden}" data-id="${l.id}">
@@ -758,7 +865,8 @@ function renderLayersPanel() {
       if (act === 'lock') { toggleLock(id); return; }
       if (act === 'del')  { deleteLayer(id); return; }
       if (act === 'name') return; // dblclick handled below
-      state.selectedId = id;
+      if (e.shiftKey) selectAdd(id);
+      else selectOnly(id);
       renderLayersPanel(); renderInspector(); positionFloatingToolbar(); draw();
     });
     const nameEl = row.querySelector('.layer-name');
@@ -1067,6 +1175,8 @@ function buildExportPayload(aspectOverride) {
     vignette: state.fx.vignette,
     filmGrain: state.fx.grain,
     letterbox: !!state.letterbox,
+    inMark:  state.inMark,
+    outMark: state.outMark,
     musicVolume: (state.music.volume || 60) / 100,
     musicFadeIn: state.music.fadeIn,
     musicFadeOut: state.music.fadeOut,
@@ -1189,6 +1299,13 @@ const CMDS = [
   { id:'redo',       label:'Redo',               cat:'Edit',  icon:'redo-2', run:redo },
   { id:'save',       label:'Save project',       cat:'File',  icon:'save', run:saveProject },
   { id:'play',       label:'Play / Pause',       cat:'Playback',icon:'play', run:togglePlay },
+  { id:'mark-in',    label:'Set in mark (I)',    cat:'Trim', icon:'log-in',   run:setInMark },
+  { id:'mark-out',   label:'Set out mark (O)',   cat:'Trim', icon:'log-out',  run:setOutMark },
+  { id:'mark-clear', label:'Clear in/out marks', cat:'Trim', icon:'rotate-ccw', run:clearMarks },
+  { id:'select-all', label:'Select all layers (⌘A)', cat:'Edit', icon:'box-select', run:selectAll },
+  { id:'duplicate',  label:'Duplicate selected (⌘D)', cat:'Edit', icon:'copy', run:duplicateSelected },
+  { id:'snap-beat',  label:'Toggle snap to beats', cat:'Audio', icon:'audio-waveform', run:()=>{ state.snapToBeat = !state.snapToBeat; toast('Snap to beat: '+(state.snapToBeat?'on':'off'), { gold:state.snapToBeat }); }},
+  { id:'detect-beats', label:'Detect beats from music', cat:'Audio', icon:'activity', run:()=>{ if (!state.audio) toast('Drop music first'); else detectBeats(state.audio.url); }},
 ];
 function setGrade(g) { state.fx.grade = g; syncStyleControls(); applyCanvasFilter(); draw(); snapshot(); }
 function addTextQuick() {
@@ -1302,8 +1419,43 @@ function togglePlay() {
   if (!video.src) { toast('Drop a video first'); return; }
   if (video.paused) video.play(); else video.pause();
 }
+function selectAll() {
+  state.selectedIds = new Set(state.layers.map(l => l.id));
+  state.selectedId = state.layers.length ? state.layers[state.layers.length-1].id : null;
+  renderLayersPanel(); renderInspector(); positionFloatingToolbar(); draw();
+}
+function setInMark() {
+  if (!state.video) return;
+  state.inMark = video.currentTime;
+  toast(`In mark: ${fmtTime(state.inMark)}`, { gold:true });
+  try { window.MC?.timeline?.render?.(); } catch {}
+  snapshot();
+}
+function setOutMark() {
+  if (!state.video) return;
+  state.outMark = video.currentTime;
+  toast(`Out mark: ${fmtTime(state.outMark)}`, { gold:true });
+  try { window.MC?.timeline?.render?.(); } catch {}
+  snapshot();
+}
+function clearMarks() {
+  state.inMark = state.outMark = null;
+  toast('Marks cleared');
+  try { window.MC?.timeline?.render?.(); } catch {}
+  snapshot();
+}
+
 function deleteSelected() {
-  if (state.selectedId) deleteLayer(state.selectedId);
+  const ids = state.selectedIds.size ? [...state.selectedIds] : (state.selectedId ? [state.selectedId] : []);
+  if (!ids.length) return;
+  state.layers = state.layers.filter(l => !ids.includes(l.id));
+  state.selectedId = null;
+  state.selectedIds.clear();
+  renderLayersPanel(); renderInspector(); positionFloatingToolbar(); draw(); snapshot();
+}
+function duplicateSelected() {
+  const ids = state.selectedIds.size ? [...state.selectedIds] : (state.selectedId ? [state.selectedId] : []);
+  ids.forEach(id => duplicateLayer(id));
 }
 
 // ============================================================
@@ -1326,7 +1478,10 @@ function onKey(e) {
   else if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
-  else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); if (state.selectedId) duplicateLayer(state.selectedId); }
+  else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelected(); }
+  else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAll(); }
+  else if (e.key === 'i' || e.key === 'I') { setInMark(); }
+  else if (e.key === 'o' || e.key === 'O') { setOutMark(); }
   else if (e.key.toLowerCase() === 't') { addTextQuick(); }
   else if (e.key.toLowerCase() === 'l') { $('file-image').click(); }
   else if (e.key.toLowerCase() === 'o') { addColorQuick(); }
@@ -1362,6 +1517,9 @@ function init() {
     deleteLayer, duplicateLayer,
     bringToFront, sendToBack,
     toggleVisibility, toggleLock,
+    setInMark, setOutMark, clearMarks,
+    selectAll, deleteSelected, duplicateSelected,
+    detectBeats,
   };
 
   // Health check

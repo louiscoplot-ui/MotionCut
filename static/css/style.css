@@ -626,6 +626,90 @@ kbd {
   opacity: 0.85;
 }
 
+/* In/Out marks */
+.tl-marks {
+  position: absolute;
+  inset: 22px 0 0 0;          /* below ruler */
+  pointer-events: none;
+  z-index: 7;
+}
+.tl-mark {
+  position: absolute;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  background: var(--gold-2);
+  color: #000;
+  font-family: var(--f-mono);
+  font-weight: 700;
+  font-size: 10px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+}
+.tl-mark::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-top: 6px solid var(--gold-2);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.tl-mark-shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.55);
+  border-right: 1px solid rgba(240,192,64,0.4);
+  pointer-events: none;
+}
+.tl-mark-shade.right { border-right: none; border-left: 1px solid rgba(240,192,64,0.4); }
+
+/* Beat markers (on audio lane) */
+.tl-beats {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.tl-beat {
+  position: absolute;
+  top: 50%;
+  width: 1px; height: 14px;
+  margin-top: -7px;
+  background: var(--gold-2);
+  opacity: 0.55;
+  box-shadow: 0 0 4px var(--gold-glow);
+}
+.tl-beat::after {
+  content: "";
+  position: absolute;
+  top: -3px; left: -2.5px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  box-shadow: 0 0 6px var(--gold-glow);
+}
+
+/* Crossfade overlap badge */
+.tl-xfade {
+  position: absolute;
+  height: 28px;
+  pointer-events: none;
+  z-index: 4;
+  background:
+    repeating-linear-gradient(45deg,
+      rgba(240,192,64,0.18) 0 6px,
+      rgba(240,192,64,0.06) 6px 12px);
+  border-top: 1px solid rgba(240,192,64,0.5);
+  border-bottom: 1px solid rgba(240,192,64,0.5);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--gold-2);
+}
+.tl-xfade [data-lucide] { width: 12px; height: 12px; }
+
 /* Playhead */
 .tl-playhead {
   position: absolute;

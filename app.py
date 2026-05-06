@@ -448,7 +448,15 @@ def build_filter_complex(payload, target_w, target_h, duration):
 
 def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path,
                    target_w, target_h, duration):
-    cmd = [FFMPEG, "-y", "-i", str(src_video)]
+    # In/Out marks for trimming the source video
+    in_mark  = payload.get("inMark")
+    out_mark = payload.get("outMark")
+    cmd = [FFMPEG, "-y"]
+    if isinstance(in_mark, (int, float)) and in_mark > 0:
+        cmd += ["-ss", f"{float(in_mark):.3f}"]
+    if isinstance(out_mark, (int, float)) and out_mark > (in_mark or 0):
+        cmd += ["-to", f"{float(out_mark):.3f}"]
+    cmd += ["-i", str(src_video)]
     for p in image_paths:
         cmd += ["-i", str(p)]
     if audio_path:
@@ -574,7 +582,10 @@ def api_export():
         if ap.exists():
             audio_path = ap
 
-    duration = probe_duration(src_path)
+    full_duration = probe_duration(src_path)
+    in_mark  = data.get("inMark")  or 0
+    out_mark = data.get("outMark") or full_duration
+    duration = max(0.1, float(out_mark) - float(in_mark))
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     template_name = re.sub(r"[^a-zA-Z0-9_-]", "_", data.get("template", "custom"))
     out_name = f"motioncut_{template_name}_{aspect.replace(':','x')}_{timestamp}.mp4"

@@ -40,13 +40,20 @@ function buildDOM() {
         <button class="tl-tbtn on" data-tool="select" title="Select (V)"><i data-lucide="mouse-pointer-2"></i></button>
         <button class="tl-tbtn"    data-tool="razor"  title="Split (S)"><i data-lucide="scissors"></i></button>
         <span class="tl-divider"></span>
+        <button class="tl-tbtn" data-act="mark-in"     title="Set in (I)"><i data-lucide="log-in"></i></button>
+        <button class="tl-tbtn" data-act="mark-out"    title="Set out (O)"><i data-lucide="log-out"></i></button>
+        <button class="tl-tbtn" data-act="mark-clear"  title="Clear marks"><i data-lucide="rotate-ccw"></i></button>
+        <span class="tl-divider"></span>
+        <button class="tl-tbtn" data-act="snap-beat"   title="Snap to beats" id="tl-snap-beat"><i data-lucide="audio-waveform"></i></button>
+        <button class="tl-tbtn" data-act="detect-beats" title="Detect beats"><i data-lucide="activity"></i></button>
+        <span class="tl-divider"></span>
         <button class="tl-tbtn" data-act="zoom-out" title="Zoom out"><i data-lucide="zoom-out"></i></button>
         <button class="tl-tbtn" data-act="zoom-in"  title="Zoom in"><i data-lucide="zoom-in"></i></button>
         <button class="tl-tbtn" data-act="zoom-fit" title="Fit"><i data-lucide="maximize-2"></i></button>
         <span class="tl-divider"></span>
         <span class="tl-time mono" id="tl-time">00:00 / 00:00</span>
         <span class="tl-grow"></span>
-        <span class="tl-hint muted small">Cmd+scroll to zoom · S to split</span>
+        <span class="tl-hint muted small">Cmd+scroll zoom · S split · I/O marks</span>
       </div>
       <div class="tl-body">
         <div class="tl-headers">
@@ -62,7 +69,9 @@ function buildDOM() {
             <div class="tl-track" id="tl-track-overlay" data-kind="overlay"></div>
             <div class="tl-track" id="tl-track-audio"   data-kind="audio">
               <canvas id="tl-waveform" class="tl-waveform"></canvas>
+              <div class="tl-beats" id="tl-beats"></div>
             </div>
+            <div class="tl-marks" id="tl-marks"></div>
             <div class="tl-playhead" id="tl-playhead"></div>
           </div>
         </div>
@@ -85,7 +94,39 @@ function render() {
   renderVideoTrack(dur);
   renderOverlayTrack(dur);
   renderAudioTrack(dur);
+  renderBeats(dur);
+  renderMarks(dur);
+  // Reflect snap-beat toggle state
+  const sb = $('tl-snap-beat');
+  if (sb) sb.classList.toggle('on', !!api.state.snapToBeat);
   updatePlayhead();
+}
+
+function renderBeats(dur) {
+  const el = $('tl-beats');
+  if (!el) return;
+  const beats = api.state.beats || [];
+  if (!beats.length) { el.innerHTML = ''; return; }
+  el.innerHTML = beats.map(t =>
+    `<div class="tl-beat" style="left:${t * pps}px"></div>`
+  ).join('');
+}
+
+function renderMarks(dur) {
+  const el = $('tl-marks');
+  if (!el) return;
+  const inM = api.state.inMark, outM = api.state.outMark;
+  let html = '';
+  if (inM != null && inM > 0) {
+    html += `<div class="tl-mark tl-mark-in"  style="left:${inM * pps}px" title="In: ${inM.toFixed(2)}s">I</div>`;
+    html += `<div class="tl-mark-shade left"  style="width:${inM * pps}px"></div>`;
+  }
+  if (outM != null && outM < dur) {
+    html += `<div class="tl-mark tl-mark-out" style="left:${outM * pps}px" title="Out: ${outM.toFixed(2)}s">O</div>`;
+    const right = (dur - outM) * pps;
+    html += `<div class="tl-mark-shade right" style="left:${outM * pps}px;width:${right}px"></div>`;
+  }
+  el.innerHTML = html;
 }
 
 function renderRuler(dur, w) {
@@ -148,10 +189,25 @@ function renderOverlayTrack(dur) {
   const totalH = Math.max(36, rows.length * rowH + 4);
   tr.style.height = totalH + 'px';
 
-  tr.innerHTML = placed.map(({ l, s, e, row }) => {
+  // Detect overlaps in same sub-row → render a crossfade hatch overlay between them
+  const xfades = [];
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      const a = placed[i], b = placed[j];
+      if (a.row !== b.row) continue;
+      const ovStart = Math.max(a.s, b.s);
+      const ovEnd   = Math.min(a.e, b.e);
+      if (ovEnd > ovStart + 0.05) {
+        xfades.push({ s: ovStart, e: ovEnd, row: a.row });
+      }
+    }
+  }
+
+  let html = placed.map(({ l, s, e, row }) => {
     const left = s * pps;
     const width = Math.max(6, (e - s) * pps);
-    const sel = api.state.selectedId === l.id ? 'selected' : '';
+    const isSel = api.state.selectedIds?.has(l.id) || api.state.selectedId === l.id;
+    const sel = isSel ? 'selected' : '';
     const hidden = !l.visible ? 'is-hidden' : '';
     const locked = l.locked ? 'is-locked' : '';
     const icon = l.type === 'text' ? 'type' : l.type === 'logo' ? 'image' : 'square';
@@ -166,6 +222,19 @@ function renderOverlayTrack(dur) {
         <div class="tl-trim right" data-trim="right"></div>
       </div>`;
   }).join('');
+
+  // Crossfade hatched zones (drawn above clips for the visual cue)
+  html += xfades.map(x => {
+    const left = x.s * pps;
+    const width = Math.max(2, (x.e - x.s) * pps);
+    const top = 4 + x.row * rowH;
+    return `<div class="tl-xfade" style="left:${left}px;width:${width}px;top:${top}px"
+                title="Crossfade · ${(x.e - x.s).toFixed(2)}s">
+              <i data-lucide="git-merge"></i>
+            </div>`;
+  }).join('');
+
+  tr.innerHTML = html;
   refreshIcons();
 }
 
@@ -312,6 +381,16 @@ function bindEvents() {
         const w = area.clientWidth - 40;
         setZoom(w / Math.max(1, getDuration()));
       }
+      if (a === 'mark-in')    api?.setInMark?.();
+      if (a === 'mark-out')   api?.setOutMark?.();
+      if (a === 'mark-clear') api?.clearMarks?.();
+      if (a === 'detect-beats') {
+        if (api.state.audio) api.detectBeats(api.state.audio.url);
+      }
+      if (a === 'snap-beat') {
+        api.state.snapToBeat = !api.state.snapToBeat;
+        b.classList.toggle('on', api.state.snapToBeat);
+      }
     });
   });
 
@@ -408,6 +487,15 @@ function startMoveDrag(id, e) {
     // Snap to playhead
     const ph = api.video.currentTime || 0;
     if (Math.abs(ph - newStart) * pps < 8) newStart = ph;
+    // Snap to beats if enabled
+    if (api.state.snapToBeat && api.state.beats?.length) {
+      let best = null, bd = Infinity;
+      for (const b of api.state.beats) {
+        const d = Math.abs(b - newStart);
+        if (d < bd) { bd = d; best = b; }
+      }
+      if (best != null && bd * pps < 12) newStart = best;
+    }
     layer.start = newStart;
     layer.end = layer.start + dur;
     render(); api.draw();
