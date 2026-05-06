@@ -360,21 +360,30 @@ async function detectBeats(url) {
 // ============================================================
 function bindDropOverlay() {
   const overlay = $('drop-overlay');
-  let depth = 0;
-  window.addEventListener('dragenter', (e) => {
-    if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
-    depth++;
+  let hideTimer = null;
+
+  // Show overlay whenever a file is being dragged anywhere over the window.
+  // Re-armed on every dragover so it stays visible while the cursor moves.
+  window.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
     overlay.classList.add('show');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => overlay.classList.remove('show'), 250);
   });
-  window.addEventListener('dragleave', (e) => {
-    depth = Math.max(0, depth - 1);
-    if (depth === 0) overlay.classList.remove('show');
-  });
-  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+
+  // Hard reset on any drop — capture phase, fires before the per-zone handlers.
+  // Per-zone handlers still run (overlay has pointer-events:none, so the drop
+  // hits the actual dropzone underneath).
+  document.addEventListener('drop', () => {
+    clearTimeout(hideTimer);
+    overlay.classList.remove('show');
+  }, true);
+
+  // Auto-handle drops not absorbed by any dropzone (auto-detect by extension).
+  // Per-zone handlers call stopPropagation, so this only runs for "drop anywhere" cases.
   window.addEventListener('drop', async (e) => {
     e.preventDefault();
-    depth = 0;
-    overlay.classList.remove('show');
     const files = [...(e.dataTransfer?.files || [])];
     for (const f of files) await handleFile(f);
   });

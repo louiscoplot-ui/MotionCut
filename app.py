@@ -90,6 +90,47 @@ def find_ffmpeg():
 FFMPEG = find_ffmpeg()
 
 
+# ----------------------------------------------------------------------------
+# Auto-pull from origin every 15s so refreshing the browser always shows the
+# latest commit. Local edits are stashed automatically. Disabled if the env var
+# MOTIONCUT_NO_AUTOPULL is set or if .git is missing.
+# ----------------------------------------------------------------------------
+def auto_pull_loop():
+    last_sha = None
+    while True:
+        try:
+            subprocess.run(
+                ["git", "fetch", "--quiet", "origin"],
+                cwd=str(BASE_DIR), capture_output=True, timeout=15
+            )
+            r = subprocess.run(
+                ["git", "pull", "--rebase", "--autostash", "--quiet"],
+                cwd=str(BASE_DIR), capture_output=True, text=True, timeout=20
+            )
+            sha = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+            if sha and sha != last_sha:
+                if last_sha is not None:
+                    print(f"[auto-pull] updated → {sha}")
+                last_sha = sha
+        except Exception as e:
+            pass
+        time.sleep(15)
+
+
+def start_auto_pull():
+    if os.environ.get("MOTIONCUT_NO_AUTOPULL"):
+        print("[auto-pull] disabled via MOTIONCUT_NO_AUTOPULL")
+        return
+    if not (BASE_DIR / ".git").exists():
+        return
+    t = threading.Thread(target=auto_pull_loop, daemon=True)
+    t.start()
+    print("[auto-pull] watching origin every 15s")
+
+
 def ffmpeg_available():
     try:
         subprocess.run(
@@ -150,9 +191,35 @@ def color_grade_filter(grade):
 # ----------------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------------
+@app.after_request
+def add_no_cache_headers(resp):
+    # For HTML / static assets we want the browser to always re-fetch, so a
+    # simple refresh after `git pull` (manual or auto) shows the latest UI.
+    # Uploads/exports keep their default headers (range requests etc).
+    p = request.path
+    if p == "/" or p.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/version")
+def api_version():
+    """Returns the current git SHA so the front-end can check for updates."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+        return jsonify({"sha": sha})
+    except Exception:
+        return jsonify({"sha": None})
 
 
 @app.route("/api/health")
@@ -649,6 +716,10 @@ if __name__ == "__main__":
     print(f" Exports: {EXPORT_DIR}")
     print(" Open http://localhost:5000")
     print("=" * 60)
+    # Auto-pull from origin every 15s so the browser refresh always shows the
+    # latest commit. Only run in the main process (not in the Werkzeug reloader child).
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
+        start_auto_pull()
     # debug=True enables auto-reload on app.py changes (hot reload).
     # For Codespaces, bind to 0.0.0.0 so the forwarded port works.
     app.run(host="0.0.0.0", port=5000, debug=True, threaded=True, use_reloader=True)
