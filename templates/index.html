@@ -277,11 +277,112 @@
       </div>
     </section>
 
+    <!-- ===== BRAND KIT ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="bookmark" class="head-icon"></i><span data-i18n="panel.brand">Brand Kit</span></h2>
+        <button id="brand-apply-current" class="ic-btn xs" title="Apply to current layers"><i data-lucide="sparkles"></i></button>
+      </div>
+      <label class="row col"><span data-i18n="brand.agency">Agency name</span>
+        <input type="text" id="brand-agency" placeholder="ACME Realty" />
+      </label>
+      <label class="row col"><span data-i18n="brand.tagline">Tagline</span>
+        <input type="text" id="brand-tagline" placeholder="Building tomorrow." />
+      </label>
+      <div class="row-grid-2">
+        <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.primary">Primary</span>
+          <input type="color" id="brand-primary" value="#f0c040" />
+        </label>
+        <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.secondary">Secondary</span>
+          <input type="color" id="brand-secondary" value="#1a1a1a" />
+        </label>
+      </div>
+      <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.font">Brand font</span>
+        <select id="brand-font">
+          <option>Syne</option>
+          <option>Inter</option>
+          <option>Manrope</option>
+          <option>Space Grotesk</option>
+          <option>Orbitron</option>
+          <option>Teko</option>
+          <option>Playfair Display</option>
+          <option>JetBrains Mono</option>
+          <option>Bebas Neue</option>
+        </select>
+      </label>
+      <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.logo">Logo</span>
+        <div id="brand-logo-preview" class="brand-logo-preview">
+          <i data-lucide="image"></i><span>No logo</span>
+        </div>
+      </label>
+      <div class="row brand-actions">
+        <button id="brand-logo-pick"  class="btn-quiet small"><i data-lucide="upload"></i><span data-i18n="brand.upload_logo">Upload logo</span></button>
+        <button id="brand-logo-clear" class="btn-quiet small"><i data-lucide="x"></i><span data-i18n="brand.clear">Clear</span></button>
+        <input type="file" id="brand-logo-input" accept="image/*" hidden />
+      </div>
+    </section>
+
     <!-- ===== TEMPLATES ===== -->
     <section class="panel">
       <div class="panel-head">
         <h2><i data-lucide="sparkles" class="head-icon"></i><span data-i18n="panel.templates">Templates</span></h2>
       </div>
+      <div class="tpl-cat">Real Estate</div>
+      <div class="templates">
+        <button class="tpl" data-template="re_drone_reveal">
+          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">$1.4M</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Drone Reveal</span>
+            <span class="tpl-desc">Drone shot · price · address</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_property_tour">
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">TOUR</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Property Tour</span>
+            <span class="tpl-desc">Cinematic walkthrough title</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_listing_card">
+          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">1:1</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Listing Card</span>
+            <span class="tpl-desc">Square · price + address</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_agent_intro">
+          <span class="tpl-thumb corporate"><span class="tpl-thumb-text">9:16</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Agent Intro</span>
+            <span class="tpl-desc">Vertical · lower-third</span>
+          </span>
+        </button>
+      </div>
+      <div class="tpl-cat">Social</div>
+      <div class="templates">
+        <button class="tpl" data-template="social_hook_reveal">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">HOOK</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Hook → Reveal</span>
+            <span class="tpl-desc">Wait-for-it pattern</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="social_listicle">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">5</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Listicle 5</span>
+            <span class="tpl-desc">Top-N kinetic intro</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="social">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">9:16</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name" data-i18n="tpl.social.name">Social</span>
+            <span class="tpl-desc" data-i18n="tpl.social.desc">Reels · TikTok · bold</span>
+          </span>
+        </button>
+      </div>
+      <div class="tpl-cat">Cinematic / Kinetic</div>
       <div class="templates">
         <button class="tpl" data-template="cinematic">
           <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">FILM</span></span>
@@ -290,11 +391,18 @@
             <span class="tpl-desc" data-i18n="tpl.cinematic.desc">Letterbox · vignette · fade title</span>
           </span>
         </button>
-        <button class="tpl" data-template="real_estate">
-          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">$1.4M</span></span>
+        <button class="tpl" data-template="cinematic_three_act">
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">III</span></span>
           <span class="tpl-info">
-            <span class="tpl-name" data-i18n="tpl.real_estate.name">Real Estate</span>
-            <span class="tpl-desc" data-i18n="tpl.real_estate.desc">Drone reveal · price tag</span>
+            <span class="tpl-name">Three-Act</span>
+            <span class="tpl-desc">3 dissolving title cards</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="kinetic_word_pop">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">POP</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Kinetic Pop</span>
+            <span class="tpl-desc">Word-by-word punch</span>
           </span>
         </button>
         <button class="tpl" data-template="travel">
@@ -302,13 +410,6 @@
           <span class="tpl-info">
             <span class="tpl-name" data-i18n="tpl.travel.name">Travel</span>
             <span class="tpl-desc" data-i18n="tpl.travel.desc">Full-width title reveal</span>
-          </span>
-        </button>
-        <button class="tpl" data-template="social">
-          <span class="tpl-thumb social"><span class="tpl-thumb-text">9:16</span></span>
-          <span class="tpl-info">
-            <span class="tpl-name" data-i18n="tpl.social.name">Social</span>
-            <span class="tpl-desc" data-i18n="tpl.social.desc">Reels · TikTok · bold</span>
           </span>
         </button>
         <button class="tpl" data-template="corporate">

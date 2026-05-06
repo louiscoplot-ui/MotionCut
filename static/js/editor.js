@@ -40,6 +40,15 @@ const state = {
   outMark: null,                // null = use video end
   beats:   [],                  // detected beat positions (seconds)
   snapToBeat: false,
+  brand: {                      // BRAND KIT (per-project)
+    agencyName: '',
+    tagline:    '',
+    primary:    '#f0c040',
+    secondary:  '#1a1a1a',
+    font:       'Syne',
+    logoUrl:    null,
+    logoFile:   null,
+  },
 };
 
 const history = { stack: [], idx: -1, max: 60 };
@@ -1522,6 +1531,104 @@ function syncStyleControls() {
 }
 
 // ============================================================
+//  Brand Kit
+// ============================================================
+function brandKey() { return 'mc-brand-' + (state.project || 'default'); }
+
+function loadBrandKit() {
+  try {
+    const raw = localStorage.getItem(brandKey());
+    if (raw) state.brand = Object.assign(state.brand, JSON.parse(raw));
+  } catch {}
+  syncBrandUI();
+}
+function saveBrandKit() {
+  try { localStorage.setItem(brandKey(), JSON.stringify(state.brand)); } catch {}
+}
+
+function syncBrandUI() {
+  const b = state.brand;
+  if ($('brand-agency'))    $('brand-agency').value    = b.agencyName || '';
+  if ($('brand-tagline'))   $('brand-tagline').value   = b.tagline    || '';
+  if ($('brand-primary'))   $('brand-primary').value   = b.primary    || '#f0c040';
+  if ($('brand-secondary')) $('brand-secondary').value = b.secondary  || '#1a1a1a';
+  if ($('brand-font'))      $('brand-font').value      = b.font       || 'Syne';
+  const preview = $('brand-logo-preview');
+  if (preview) {
+    if (b.logoUrl) {
+      preview.innerHTML = `<img src="${b.logoUrl}" alt="logo" />`;
+      preview.classList.add('has-logo');
+    } else {
+      preview.innerHTML = `<i data-lucide="image"></i><span>No logo</span>`;
+      preview.classList.remove('has-logo');
+      refreshIcons();
+    }
+  }
+}
+
+/** Substitute ${brand.X} placeholders in template strings. */
+function brandSub(s) {
+  if (typeof s !== 'string') return s;
+  return s.replace(/\$\{brand\.(\w+)\}/g, (_, k) => {
+    const v = state.brand?.[k];
+    return v != null && v !== '' ? v : '';
+  });
+}
+
+function bindBrandKit() {
+  const fields = ['agency','tagline','primary','secondary','font'];
+  fields.forEach(f => {
+    const el = $('brand-' + f);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const map = { agency:'agencyName', tagline:'tagline', primary:'primary', secondary:'secondary', font:'font' };
+      state.brand[map[f]] = el.value;
+      saveBrandKit();
+    });
+  });
+  $('brand-logo-pick')?.addEventListener('click', () => $('brand-logo-input').click());
+  $('brand-logo-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    // Optimistic: use local URL immediately, upload to project for export
+    state.brand.logoUrl = URL.createObjectURL(file);
+    syncBrandUI(); saveBrandKit();
+    try {
+      const meta = await uploadFile(file, 'image', () => {});
+      state.brand.logoUrl  = meta.url;
+      state.brand.logoFile = meta.filename;
+      syncBrandUI(); saveBrandKit();
+      refreshLibrary();
+      toast('Brand logo set', { gold: true });
+    } catch (err) {
+      toast('Logo upload failed: ' + err.message);
+    }
+    e.target.value = '';
+  });
+  $('brand-logo-clear')?.addEventListener('click', () => {
+    state.brand.logoUrl = null;
+    state.brand.logoFile = null;
+    syncBrandUI(); saveBrandKit();
+  });
+  $('brand-apply-current')?.addEventListener('click', applyBrandToCurrentLayers);
+}
+
+function applyBrandToCurrentLayers() {
+  const b = state.brand;
+  let touched = 0;
+  for (const l of state.layers) {
+    if (l.type === 'text') {
+      if (b.font)      { l.fontFamily = b.font; touched++; }
+    }
+    if (l.type === 'color') {
+      if (b.primary)   { l.color = b.primary; touched++; }
+    }
+  }
+  toast(`Applied brand to ${touched} layers`, { gold: true });
+  draw(); snapshot();
+}
+
+// ============================================================
 //  Templates
 // ============================================================
 const templates = {
@@ -1568,23 +1675,162 @@ const templates = {
   corporate: () => {
     state.template = 'corporate'; state.letterbox = false; state.fx.grade = 'natural';
     state.layers = [
-      makeTextLayer({ text:'ACME · INC', fontFamily:'Syne', fontSize:36, fontWeight:700,
-        x:canvasW*0.92, y:canvasH*0.08, align:'right', color:'#ffffff', animation:'fade', start:0, end:999 }),
+      makeTextLayer({ text:'${brand.agencyName}', fontFamily:'Syne', fontSize:36, fontWeight:700,
+        x:canvasW*0.92, y:canvasH*0.08, align:'right', color:'#ffffff', animation:'fade', start:0, end:999, exit:'blur' }),
       makeTextLayer({ text:'Building tomorrow,\nshipping today.', fontFamily:'Playfair Display', fontSize:72, fontWeight:700,
-        x:canvasW*0.08, y:canvasH*0.5, align:'left', color:'#ffffff', animation:'cinematic', start:0.4, end:999 }),
-      makeColorLayer({ x:canvasW*0.08, y:canvasH*0.6, width:canvasW*0.2, height:3, color:'#f0c040', opacity:1 }),
-      makeTextLayer({ text:'Q4 · 2026', fontFamily:'JetBrains Mono', fontSize:28, fontWeight:400,
-        x:canvasW*0.08, y:canvasH*0.92, align:'left', color:'#f0c040', animation:'fade', start:0.8, end:999 }),
+        x:canvasW*0.08, y:canvasH*0.5, align:'left', color:'#ffffff', animation:'cinematic', start:0.4, end:999, exit:'blur' }),
+      makeColorLayer({ x:canvasW*0.08, y:canvasH*0.6, width:canvasW*0.2, height:3, color:'${brand.primary}', opacity:1 }),
+      makeTextLayer({ text:'${brand.tagline}', fontFamily:'JetBrains Mono', fontSize:28, fontWeight:400,
+        x:canvasW*0.08, y:canvasH*0.92, align:'left', color:'${brand.primary}', animation:'fade', start:0.8, end:999, exit:'blur' }),
+    ];
+  },
+
+  // ========== NEW REAL ESTATE TEMPLATES ==========
+  re_drone_reveal: () => {
+    state.template = 're_drone_reveal'; state.letterbox = false; state.fx.grade = 'bright_airy';
+    state.layers = [
+      makeColorLayer({ x:0, y:canvasH*0.78, width:canvasW, height:canvasH*0.22,
+        color:'#000000', opacity:0.5 }),
+      makeTextLayer({ text:'${brand.agencyName}', fontFamily:'${brand.font}', fontSize:30, fontWeight:700,
+        x:canvasW*0.06, y:canvasH*0.08, align:'left', color:'#ffffff', animation:'fade', start:0.2, end:999, exit:'blur' }),
+      makeTextLayer({ text:'$1,495,000', fontFamily:'Bebas Neue', fontSize:90,
+        x:canvasW*0.94, y:canvasH*0.10, align:'right', color:'${brand.primary}', animation:'cinematic', start:0.4, end:999, exit:'mask-wipe' }),
+      makeTextLayer({ text:'4 OAK GROVE AVENUE', fontFamily:'Orbitron', fontSize:72, fontWeight:800,
+        x:canvasW*0.06, y:canvasH*0.86, align:'left', color:'#ffffff', animation:'tracking', start:0.8, end:999, exit:'blur' }),
+      makeTextLayer({ text:'Brisbane · QLD · 4 bd · 3 ba', fontFamily:'${brand.font}', fontSize:28, fontWeight:500,
+        x:canvasW*0.06, y:canvasH*0.94, align:'left', color:'${brand.primary}', animation:'fade', start:1.2, end:999 }),
+    ];
+  },
+
+  re_property_tour: () => {
+    state.template = 're_property_tour'; state.letterbox = true; state.fx.grade = 'cinematic';
+    state.layers = [
+      makeTextLayer({ text:'A LIFE WELL LIVED', fontFamily:'Playfair Display', fontSize:120, fontWeight:700,
+        x:canvasW/2, y:canvasH*0.42, color:'#ffffff', animation:'cinematic', start:0.5, end:5, exit:'defocus' }),
+      makeTextLayer({ text:'A property by ${brand.agencyName}', fontFamily:'${brand.font}', fontSize:32, fontWeight:400,
+        x:canvasW/2, y:canvasH*0.55, color:'${brand.primary}', animation:'fade', start:1.2, end:5, exit:'blur' }),
+    ];
+  },
+
+  re_listing_card: () => {
+    state.template = 're_listing_card'; setAspect('1:1'); state.fx.grade = 'bright_airy';
+    state.layers = [
+      makeColorLayer({ x:0, y:canvasH*0.7, width:canvasW, height:canvasH*0.3,
+        color:'#000000', opacity:0.6 }),
+      makeTextLayer({ text:'NEW LISTING', fontFamily:'Bebas Neue', fontSize:60,
+        x:canvasW/2, y:canvasH*0.78, color:'${brand.primary}', animation:'tracking', start:0.3, end:999 }),
+      makeTextLayer({ text:'$1,495,000', fontFamily:'Orbitron', fontSize:90, fontWeight:800,
+        x:canvasW/2, y:canvasH*0.88, color:'#ffffff', animation:'cinematic', start:0.7, end:999, exit:'mask-wipe' }),
+      makeTextLayer({ text:'4 OAK GROVE AVE · BRISBANE', fontFamily:'${brand.font}', fontSize:28, fontWeight:500,
+        x:canvasW/2, y:canvasH*0.96, color:'${brand.primary}', animation:'fade', start:1.0, end:999 }),
+    ];
+  },
+
+  re_agent_intro: () => {
+    state.template = 're_agent_intro'; setAspect('9:16'); state.letterbox = false; state.fx.grade = 'bright_airy';
+    state.layers = [
+      makeColorLayer({ x:0, y:canvasH*0.82, width:canvasW, height:canvasH*0.18,
+        color:'${brand.secondary}', opacity:0.85 }),
+      makeColorLayer({ x:canvasW*0.06, y:canvasH*0.84, width:canvasW*0.15, height:4,
+        color:'${brand.primary}', opacity:1 }),
+      makeTextLayer({ text:'${brand.agencyName}', fontFamily:'${brand.font}', fontSize:42, fontWeight:700,
+        x:canvasW*0.06, y:canvasH*0.88, align:'left', color:'#ffffff', animation:'fade', start:0.3, end:999, exit:'blur' }),
+      makeTextLayer({ text:'${brand.tagline}', fontFamily:'${brand.font}', fontSize:30, fontWeight:400,
+        x:canvasW*0.06, y:canvasH*0.94, align:'left', color:'${brand.primary}', animation:'fade', start:0.7, end:999 }),
+    ];
+  },
+
+  // ========== NEW SOCIAL TEMPLATES ==========
+  social_hook_reveal: () => {
+    state.template = 'social_hook_reveal'; setAspect('9:16'); state.fx.vignette = true; state.fx.grade = 'moody_dark';
+    state.layers = [
+      makeTextLayer({ text:'WAIT  FOR  IT', fontFamily:'Bebas Neue', fontSize:200,
+        x:canvasW/2, y:canvasH*0.30, color:'#ffffff', animation:'bounce', start:0.2, end:3, exit:'blur' }),
+      makeTextLayer({ text:'…', fontFamily:'Bebas Neue', fontSize:200,
+        x:canvasW/2, y:canvasH*0.45, color:'${brand.primary}', animation:'typewriter', start:1.5, end:3, exit:'dissolve' }),
+      makeTextLayer({ text:'😱  GAME CHANGER', fontFamily:'Bebas Neue', fontSize:160,
+        x:canvasW/2, y:canvasH*0.45, color:'${brand.primary}', animation:'reveal', start:3.2, end:7, exit:'mask-wipe' }),
+      makeTextLayer({ text:'#fyp  #foryou  #viral', fontFamily:'${brand.font}', fontSize:46, fontWeight:600,
+        x:canvasW/2, y:canvasH*0.92, color:'#ffffff', animation:'fade', start:1.0, end:999 }),
+    ];
+  },
+
+  social_listicle: () => {
+    state.template = 'social_listicle'; setAspect('9:16'); state.fx.grade = 'cinematic';
+    state.layers = [
+      makeTextLayer({ text:'5 THINGS', fontFamily:'Bebas Neue', fontSize:200,
+        x:canvasW/2, y:canvasH*0.20, color:'${brand.primary}', animation:'cinematic', start:0.2, end:3, exit:'blur' }),
+      makeTextLayer({ text:'YOU NEED', fontFamily:'Bebas Neue', fontSize:120,
+        x:canvasW/2, y:canvasH*0.32, color:'#ffffff', animation:'tracking', start:0.6, end:3, exit:'blur' }),
+      makeTextLayer({ text:'TO KNOW', fontFamily:'Bebas Neue', fontSize:120,
+        x:canvasW/2, y:canvasH*0.42, color:'#ffffff', animation:'tracking', start:1.0, end:3, exit:'blur' }),
+      makeTextLayer({ text:'★  ★  ★  ★  ★', fontFamily:'${brand.font}', fontSize:60, fontWeight:600,
+        x:canvasW/2, y:canvasH*0.55, color:'${brand.primary}', animation:'reveal', start:1.5, end:3, exit:'fade' }),
+    ];
+  },
+
+  // ========== NEW CINEMATIC / KINETIC TEMPLATES ==========
+  cinematic_three_act: () => {
+    state.template = 'cinematic_three_act'; state.letterbox = true; state.fx.grade = 'cinematic'; state.fx.vignette = true;
+    state.layers = [
+      makeTextLayer({ text:'I.  THE OPENING', fontFamily:'Playfair Display', fontSize:96, fontWeight:700,
+        x:canvasW/2, y:canvasH/2, color:'#ffffff', animation:'cinematic', start:0.4, end:3.5, exit:'defocus' }),
+      makeTextLayer({ text:'II.  THE TURN', fontFamily:'Playfair Display', fontSize:96, fontWeight:700,
+        x:canvasW/2, y:canvasH/2, color:'#ffffff', animation:'cinematic', start:4.0, end:7.0, exit:'defocus' }),
+      makeTextLayer({ text:'III.  THE PROMISE', fontFamily:'Playfair Display', fontSize:96, fontWeight:700,
+        x:canvasW/2, y:canvasH/2, color:'${brand.primary}', animation:'cinematic', start:7.5, end:999, exit:'mask-wipe' }),
+    ];
+  },
+
+  kinetic_word_pop: () => {
+    state.template = 'kinetic_word_pop'; setAspect('9:16'); state.fx.grade = 'moody_dark';
+    state.layers = [
+      makeTextLayer({ text:'BOLD', fontFamily:'Bebas Neue', fontSize:280,
+        x:canvasW/2, y:canvasH*0.30, color:'${brand.primary}', animation:'bounce', start:0.0, end:0.8, exit:'blur' }),
+      makeTextLayer({ text:'BIGGER', fontFamily:'Bebas Neue', fontSize:240,
+        x:canvasW/2, y:canvasH*0.45, color:'#ffffff', animation:'bounce', start:0.7, end:1.5, exit:'blur' }),
+      makeTextLayer({ text:'BETTER', fontFamily:'Bebas Neue', fontSize:240,
+        x:canvasW/2, y:canvasH*0.60, color:'${brand.primary}', animation:'bounce', start:1.4, end:2.5, exit:'mask-wipe' }),
+      makeTextLayer({ text:'${brand.agencyName}', fontFamily:'${brand.font}', fontSize:46, fontWeight:600,
+        x:canvasW/2, y:canvasH*0.92, color:'#ffffff', animation:'fade', start:2.5, end:999 }),
     ];
   },
 };
 function applyTemplate(name) {
   if (!templates[name]) return;
   templates[name]();
+  // Resolve ${brand.X} placeholders across text + color + font fields
+  for (const l of state.layers) {
+    if (l.text)        l.text       = brandSub(l.text);
+    if (l.color)       l.color      = brandSub(l.color);
+    if (l.fontFamily)  l.fontFamily = brandSub(l.fontFamily) || l.fontFamily;
+    // If brand left an empty result (e.g. unset agency name), fall back to type label
+    if (l.type === 'text' && !l.text) l.text = '—';
+  }
+  // Auto-add a brand logo layer if available and template doesn't already have a logo
+  if (state.brand?.logoUrl && !state.layers.some(l => l.type === 'logo' && l._brandLogo)) {
+    const img = new Image(); img.crossOrigin = 'anonymous'; img.src = state.brand.logoUrl;
+    const logo = makeLogoLayer({
+      src: state.brand.logoFile || 'brand_logo',
+      url: state.brand.logoUrl,
+      img,
+      x: 60, y: 60,
+      width: Math.min(220, canvasW * 0.12),
+      height: Math.min(220, canvasW * 0.12),
+      opacity: 0.95,
+      _brandLogo: true,
+    });
+    img.onload = () => {
+      const r = img.naturalWidth / img.naturalHeight;
+      logo.height = logo.width / r;
+      draw();
+    };
+    state.layers.unshift(logo);
+  }
   state.selectedId = state.layers[0]?.id || null;
   renderLayersPanel(); renderInspector(); syncStyleControls(); positionFloatingToolbar();
   snapshot(); draw();
-  toast(`Template: ${name.replace('_',' ')}`, { gold:true });
+  toast(`Template: ${name.replace(/_/g,' ')}`, { gold:true });
 }
 
 // ============================================================
@@ -1914,6 +2160,7 @@ function setProject(id) {
   const proj = state.projects.find(p => p.id === state.project);
   $('project-name').textContent = proj?.name || 'Default';
   refreshLibrary();
+  loadBrandKit();
 }
 
 async function refreshProjectMenu() {
@@ -2377,7 +2624,9 @@ function init() {
     const display = state.projects.find(p => p.id === state.project);
     $('project-name').textContent = display?.name || 'Default';
     refreshLibrary();
+    loadBrandKit();
   });
+  bindBrandKit();
 
   // Language toggle (cycles through registered languages)
   $('btn-lang')?.addEventListener('click', () => {
