@@ -1163,6 +1163,145 @@ function applyTemplate(name) {
 }
 
 // ============================================================
+//  Mini template previews (animated canvas thumbnails)
+// ============================================================
+const TPL_PREVIEWS = {
+  cinematic: {
+    duration: 4, letterbox: true,
+    items: [
+      { text:'A FILM',  font:'Playfair Display', size:13, weight:700, x:50, y:46, color:'#fff', anim:'cinematic', start:0.3, end:3.6 },
+      { text:'BY YOU',  font:'Syne',  size:6,  weight:500, x:50, y:62, color:'#f0c040', anim:'fade',     start:0.7, end:3.6 },
+    ],
+  },
+  real_estate: {
+    duration: 4,
+    items: [
+      { text:'$1.4M',   font:'Bebas Neue',  size:13, weight:400, x:75, y:25, color:'#f0c040', anim:'fade',     start:0.2, end:3.6 },
+      { text:'OAK GROVE',font:'Orbitron',   size:7,  weight:800, x:30, y:78, color:'#fff',    anim:'tracking', start:0.4, end:3.6, align:'left' },
+    ],
+  },
+  travel: {
+    duration: 4,
+    items: [
+      { text:'WANDER', font:'Teko',  size:20, weight:700, x:50, y:50, color:'#fff',    anim:'reveal', start:0.3, end:3.6 },
+      { text:'◷ Kyoto', font:'Syne', size:5,  weight:500, x:50, y:84, color:'#f0c040', anim:'fade',   start:1.0, end:3.6 },
+    ],
+  },
+  social: {
+    duration: 3,
+    items: [
+      { text:'WAIT', font:'Bebas Neue', size:18, weight:400, x:50, y:36, color:'#fff',    anim:'bounce', start:0.2, end:2.8 },
+      { text:'#fyp', font:'Syne',       size:6,  weight:600, x:50, y:78, color:'#f0c040', anim:'fade',   start:0.7, end:2.8 },
+    ],
+  },
+  corporate: {
+    duration: 4,
+    items: [
+      { text:'ACME',   font:'Syne',           size:5,  weight:700, x:88, y:18, color:'#fff', align:'right', anim:'fade',     start:0.1, end:3.6 },
+      { text:'BUILD.', font:'Playfair Display',size:11, weight:700, x:14, y:50, color:'#fff', align:'left',  anim:'cinematic', start:0.4, end:3.6 },
+    ],
+  },
+};
+
+function easeOut3(t) { return 1 - Math.pow(1 - t, 3); }
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+function drawTplPreview(canvas, spec, t) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Letterbox
+  if (spec.letterbox) {
+    const bar = H * 0.12;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, bar);
+    ctx.fillRect(0, H - bar, W, bar);
+  }
+
+  for (const it of spec.items) {
+    if (t < it.start || t > it.end) continue;
+    let alpha = 1, dx = 0, dy = 0, txt = it.text;
+    const local = t - it.start;
+    const inP   = clamp01(local / 0.5);
+    const outP  = clamp01((it.end - t) / 0.5);
+    switch (it.anim) {
+      case 'fade':      alpha = Math.min(easeOut3(inP), easeOut3(outP)); break;
+      case 'cinematic': alpha = Math.min(easeOut3(inP), easeOut3(outP)); dy = (1 - easeOut3(inP)) * -4; break;
+      case 'tracking':  alpha = Math.min(easeOut3(inP), easeOut3(outP)); ctx.letterSpacing = ((1 - easeOut3(Math.min(local/0.6,1))) * 4) + 'px'; break;
+      case 'reveal':    alpha = Math.min(easeOut3(inP), easeOut3(outP));
+                        const p = easeOut3(clamp01(local / 0.6));
+                        ctx.save();
+                        ctx.beginPath(); ctx.rect(0, 0, W * p, H); ctx.clip();
+                        break;
+      case 'bounce':    alpha = Math.min(easeOut3(inP), easeOut3(outP)); dy = -Math.abs(Math.sin(local * 6)) * 3 * outP; break;
+      default:          alpha = Math.min(easeOut3(inP), easeOut3(outP));
+    }
+    const sizePx = it.size * (canvas._dpr || 1);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = it.color;
+    ctx.textAlign = it.align || 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${it.weight || 700} ${sizePx}px "${it.font}", sans-serif`;
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 4;
+    ctx.fillText(txt, (it.x/100) * W + dx, (it.y/100) * H + dy);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    if (it.anim === 'reveal') ctx.restore();
+    if (it.anim === 'tracking') ctx.letterSpacing = '0px';
+  }
+}
+
+function setupTplPreview(thumbEl, name) {
+  const spec = TPL_PREVIEWS[name];
+  if (!spec) return;
+  const cv = document.createElement('canvas');
+  cv.className = 'tpl-prev-canvas';
+  thumbEl.appendChild(cv);
+  // Hide static text label — canvas takes over
+  thumbEl.querySelector('.tpl-thumb-text')?.classList.add('hidden');
+
+  const sizeCanvas = () => {
+    const r = thumbEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    cv.width  = Math.max(2, Math.round(r.width * dpr));
+    cv.height = Math.max(2, Math.round(r.height * dpr));
+    cv._dpr = dpr;
+  };
+  sizeCanvas();
+
+  // Static "best frame" preview (peak animation)
+  const peak = spec.duration * 0.55;
+  drawTplPreview(cv, spec, peak);
+
+  // Animated loop on hover
+  let raf = null, t0 = 0, hovering = false;
+  const tick = (now) => {
+    if (!hovering) return;
+    if (!t0) t0 = now;
+    const t = ((now - t0) / 1000) % spec.duration;
+    drawTplPreview(cv, spec, t);
+    raf = requestAnimationFrame(tick);
+  };
+  thumbEl.parentElement.addEventListener('mouseenter', () => {
+    hovering = true; t0 = 0;
+    sizeCanvas();
+    raf = requestAnimationFrame(tick);
+  });
+  thumbEl.parentElement.addEventListener('mouseleave', () => {
+    hovering = false;
+    if (raf) cancelAnimationFrame(raf);
+    drawTplPreview(cv, spec, peak);     // back to "best frame"
+  });
+  // Resize on window resize
+  window.addEventListener('resize', () => {
+    sizeCanvas();
+    drawTplPreview(cv, spec, hovering ? 0 : peak);
+  });
+}
+
+// ============================================================
 //  Export
 // ============================================================
 function buildExportPayload(aspectOverride) {
@@ -1306,7 +1445,26 @@ const CMDS = [
   { id:'duplicate',  label:'Duplicate selected (⌘D)', cat:'Edit', icon:'copy', run:duplicateSelected },
   { id:'snap-beat',  label:'Toggle snap to beats', cat:'Audio', icon:'audio-waveform', run:()=>{ state.snapToBeat = !state.snapToBeat; toast('Snap to beat: '+(state.snapToBeat?'on':'off'), { gold:state.snapToBeat }); }},
   { id:'detect-beats', label:'Detect beats from music', cat:'Audio', icon:'activity', run:()=>{ if (!state.audio) toast('Drop music first'); else detectBeats(state.audio.url); }},
+  { id:'theme',      label:'Toggle light / dark theme', cat:'View',  icon:'sun', run:toggleTheme },
 ];
+
+// ============================================================
+//  Theme toggle
+// ============================================================
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const btn = $('btn-theme');
+  if (btn) {
+    const ic = btn.querySelector('[data-lucide]');
+    if (ic) ic.setAttribute('data-lucide', t === 'light' ? 'moon' : 'sun');
+    refreshIcons();
+  }
+  try { localStorage.setItem('mc-theme', t); } catch {}
+}
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme || 'dark';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
+}
 function setGrade(g) { state.fx.grade = g; syncStyleControls(); applyCanvasFilter(); draw(); snapshot(); }
 function addTextQuick() {
   const l = makeTextLayer({ end: video.duration||8 });
@@ -1353,11 +1511,17 @@ function bindCmdk() {
   $('cmdk-input').addEventListener('input', (e) => renderCmdk(e.target.value));
   $('cmdk-input').addEventListener('keydown', (e) => {
     const rows = $('cmdk-results').querySelectorAll('.cmdk-row');
-    if (e.key === 'Escape') { closeCmdk(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); cmdkIdx = Math.min(rows.length-1, cmdkIdx+1); updateCmdkSel(rows); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); cmdkIdx = Math.min(rows.length-1, cmdkIdx+1); updateCmdkSel(rows); }
     else if (e.key === 'ArrowUp')   { e.preventDefault(); cmdkIdx = Math.max(0, cmdkIdx-1); updateCmdkSel(rows); }
     else if (e.key === 'Enter')     { e.preventDefault(); runCmdkAt(cmdkIdx); }
   });
+  // Global Escape — works even if focus left the input
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('cmdk-backdrop').classList.contains('show')) {
+      e.preventDefault();
+      closeCmdk();
+    }
+  }, true);
 }
 function updateCmdkSel(rows) {
   rows.forEach((r,i) => r.classList.toggle('on', i===cmdkIdx));
@@ -1563,9 +1727,16 @@ function init() {
   document.querySelectorAll('.aspect-segmented .aspect').forEach(b =>
     b.addEventListener('click', () => setAspect(b.dataset.aspect)));
 
-  // Templates
-  document.querySelectorAll('.tpl').forEach(b =>
-    b.addEventListener('click', () => applyTemplate(b.dataset.template)));
+  // Templates — animated mini-previews + click handler
+  document.querySelectorAll('.tpl').forEach(b => {
+    b.addEventListener('click', () => applyTemplate(b.dataset.template));
+    const thumb = b.querySelector('.tpl-thumb');
+    if (thumb) setupTplPreview(thumb, b.dataset.template);
+  });
+
+  // Theme toggle
+  applyTheme(localStorage.getItem('mc-theme') || 'dark');
+  $('btn-theme')?.addEventListener('click', toggleTheme);
 
   // Playback
   $('btn-play').addEventListener('click', togglePlay);
