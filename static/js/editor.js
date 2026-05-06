@@ -24,6 +24,8 @@ const FONTS = [
 ];
 
 const state = {
+  project: 'default',
+  projects: [],
   video: null,
   audio: null,
   aspect: '16:9',
@@ -213,6 +215,7 @@ async function uploadFile(file, kind, onProgress) {
   if (file.size <= CHUNK_THRESHOLD) {
     const fd = new FormData();
     fd.append('file', file); fd.append('kind', kind);
+    fd.append('project', state.project || 'default');
     const r = await fetch('/api/upload', { method: 'POST', body: fd });
     if (!r.ok) {
       const err = await r.json().catch(()=>({}));
@@ -234,6 +237,7 @@ async function uploadChunked(file, kind, onProgress) {
     fd.append('totalChunks', total);
     fd.append('filename', file.name);
     fd.append('kind', kind);
+    fd.append('project', state.project || 'default');
     fd.append('chunk', file.slice(start, end), 'chunk');
     const r = await fetch('/api/upload/chunk', { method: 'POST', body: fd });
     if (!r.ok) {
@@ -369,60 +373,52 @@ async function detectBeats(url) {
 // ============================================================
 function bindDropOverlay() {
   const overlay = $('drop-overlay');
+  let active = false;        // truly inside a file-drag session
+  let lastTick = 0;          // timestamp of last dragover
+  let watchdog = null;       // interval that auto-closes if drag stalls
 
-  const show = () => overlay.classList.add('show');
-  const hide = () => overlay.classList.remove('show');
-
-  // dragenter/leave fire many times as the cursor crosses child boundaries.
-  // We debounce hide via a small timeout that's canceled by any new enter/over.
-  let leaveTimer = null;
-  const scheduleHide = (ms = 60) => {
-    clearTimeout(leaveTimer);
-    leaveTimer = setTimeout(hide, ms);
+  const open = () => {
+    if (active) return;
+    active = true;
+    overlay.classList.add('show');
+    // Watchdog: if no dragover event for 180ms, the drag is over → hide.
+    // Catches edge cases where the browser doesn't fire drop/dragend cleanly.
+    if (!watchdog) {
+      watchdog = setInterval(() => {
+        if (active && Date.now() - lastTick > 180) close();
+      }, 60);
+    }
   };
-  const cancelHide = () => clearTimeout(leaveTimer);
+  const close = () => {
+    active = false;
+    overlay.classList.remove('show');
+    if (watchdog) { clearInterval(watchdog); watchdog = null; }
+  };
 
-  // Show on first dragenter that carries files
+  // dragenter — first signal that a file-drag started over the page
   window.addEventListener('dragenter', (e) => {
     if (!e.dataTransfer?.types?.includes('Files')) return;
-    cancelHide();
-    show();
+    lastTick = Date.now();
+    open();
   });
 
-  // dragover is required to enable drop, and keeps the overlay alive
+  // dragover — preventDefault to enable drop + keep watchdog alive
   window.addEventListener('dragover', (e) => {
     if (!e.dataTransfer?.types?.includes('Files')) return;
     e.preventDefault();
-    cancelHide();
+    lastTick = Date.now();
   });
 
-  // When the cursor leaves the document or stops carrying files, schedule hide
-  window.addEventListener('dragleave', (e) => {
-    // Only count "leaving the window" leaves to avoid flicker on inner elements
-    if (e.relatedTarget == null && (e.clientX <= 0 || e.clientY <= 0
-        || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight)) {
-      scheduleHide(0);
-    } else {
-      scheduleHide(80);
-    }
-  });
+  // ALWAYS close on drop (capture phase fires before per-zone handlers)
+  document.addEventListener('drop', () => close(), true);
+  window.addEventListener('dragend',  () => close(), true);
+  window.addEventListener('blur',     () => close());
+  document.addEventListener('mouseup', () => close(), true);  // belt + braces
 
-  // ALWAYS hide on drop (capture phase, fires before per-zone handlers)
-  document.addEventListener('drop', () => {
-    cancelHide();
-    hide();
-  }, true);
-
-  // Hide on dragend (release outside any drop target)
-  window.addEventListener('dragend', () => { cancelHide(); hide(); }, true);
-
-  // Hide if the page loses focus mid-drag (e.g. user switches window)
-  window.addEventListener('blur', () => { cancelHide(); hide(); });
-
-  // Auto-handle drops not absorbed by a per-zone dropzone (auto-detect by extension).
-  // Per-zone handlers call stopPropagation, so this only runs for "drop anywhere".
+  // Auto-handle drops not absorbed by a per-zone dropzone
   window.addEventListener('drop', async (e) => {
     e.preventDefault();
+    close();
     const files = [...(e.dataTransfer?.files || [])];
     for (const f of files) await handleFile(f);
   });
@@ -1356,6 +1352,7 @@ function setupTplPreview(thumbEl, name) {
 // ============================================================
 function buildExportPayload(aspectOverride) {
   return {
+    project: state.project || 'default',
     video: state.video?.filename,
     audio: state.audio?.filename || null,
     aspect: aspectOverride || state.aspect,
@@ -1497,6 +1494,149 @@ const CMDS = [
   { id:'detect-beats', label:'Detect beats from music', cat:'Audio', icon:'activity', run:()=>{ if (!state.audio) toast('Drop music first'); else detectBeats(state.audio.url); }},
   { id:'theme',      label:'Toggle light / dark theme', cat:'View',  icon:'sun', run:toggleTheme },
 ];
+
+// ============================================================
+//  Projects (folders) & media library
+// ============================================================
+async function fetchProjects() {
+  try {
+    const r = await fetch('/api/projects');
+    const d = await r.json();
+    state.projects = d.projects || [];
+    return state.projects;
+  } catch { return []; }
+}
+
+async function createProject(name) {
+  const r = await fetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  return r.json();
+}
+
+async function deleteProject(id) {
+  const r = await fetch('/api/projects/' + encodeURIComponent(id), { method: 'DELETE' });
+  return r.json();
+}
+
+async function fetchProjectFiles(id) {
+  try {
+    const r = await fetch('/api/projects/' + encodeURIComponent(id) + '/files');
+    const d = await r.json();
+    return d.files || [];
+  } catch { return []; }
+}
+
+function setProject(id) {
+  state.project = id || 'default';
+  try { localStorage.setItem('mc-project', state.project); } catch {}
+  const proj = state.projects.find(p => p.id === state.project);
+  $('project-name').textContent = proj?.name || 'Default';
+  refreshLibrary();
+}
+
+async function refreshProjectMenu() {
+  await fetchProjects();
+  const list = $('project-list');
+  if (!list) return;
+  list.innerHTML = state.projects.map(p => `
+    <div class="project-item ${p.id === state.project ? 'active' : ''}" data-id="${p.id}">
+      <i data-lucide="${p.id === state.project ? 'folder-open' : 'folder'}"></i>
+      <div class="project-item-info">
+        <div class="project-item-name">${escapeHTML(p.name)}</div>
+        <div class="project-item-meta">${p.file_count} file${p.file_count===1?'':'s'}</div>
+      </div>
+      ${p.id === 'default' ? '' : `<button class="project-del" data-del="${p.id}" title="Delete"><i data-lucide="trash-2"></i></button>`}
+    </div>
+  `).join('') || `<div class="muted small" style="padding:10px;text-align:center">No projects</div>`;
+  refreshIcons();
+  list.querySelectorAll('.project-item').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.project-del')) return;
+      const id = row.dataset.id;
+      setProject(id);
+      const proj = state.projects.find(p => p.id === id);
+      toast(window.MC?.i18n?.t('toast.project_switched', { n: proj?.name || id }) || ('Switched: ' + id), { gold: true });
+      $('project-menu').classList.add('hidden');
+      refreshProjectMenu();
+    });
+  });
+  list.querySelectorAll('.project-del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.del;
+      const t = window.MC?.i18n?.t || ((k)=>k);
+      if (!confirm(t('project.confirm_delete'))) return;
+      await deleteProject(id);
+      if (state.project === id) setProject('default');
+      toast(t('toast.project_deleted'));
+      refreshProjectMenu();
+    });
+  });
+}
+
+async function refreshLibrary() {
+  const lib = $('library');
+  if (!lib) return;
+  const t = window.MC?.i18n?.t || ((k)=>k);
+  const files = await fetchProjectFiles(state.project);
+  if (!files.length) {
+    lib.innerHTML = `<div class="library-empty muted small">${escapeHTML(t('library.empty'))}</div>`;
+    return;
+  }
+  lib.innerHTML = files.map(f => {
+    const icon = f.kind === 'video' ? 'film' : f.kind === 'image' ? 'image' : 'music';
+    const display = f.name.replace(/^[a-f0-9]{6,16}_/, '');
+    return `
+      <div class="lib-item" data-name="${escapeHTML(f.name)}" data-url="${escapeHTML(f.url)}" data-kind="${f.kind}" title="${escapeHTML(display)}">
+        <i data-lucide="${icon}"></i>
+        <span class="lib-name">${escapeHTML(display)}</span>
+        <span class="lib-kind">${escapeHTML(t('library.' + f.kind))}</span>
+      </div>`;
+  }).join('');
+  refreshIcons();
+  lib.querySelectorAll('.lib-item').forEach(it => {
+    it.addEventListener('click', () => {
+      const meta = {
+        filename: it.dataset.name,
+        url: it.dataset.url,
+        kind: it.dataset.kind,
+        duration: 0,
+      };
+      if (meta.kind === 'video') applyVideo(meta);
+      else if (meta.kind === 'image') applyLogo(meta);
+      else if (meta.kind === 'audio') applyMusic(meta);
+    });
+  });
+}
+
+function bindProjectPicker() {
+  const btn = $('btn-project');
+  const menu = $('project-menu');
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const wasHidden = menu.classList.contains('hidden');
+    menu.classList.toggle('hidden');
+    if (wasHidden) await refreshProjectMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target) && e.target !== btn) menu.classList.add('hidden');
+  });
+  $('btn-new-project').addEventListener('click', async () => {
+    const t = window.MC?.i18n?.t || ((k)=>k);
+    const name = prompt(t('project.prompt'), '');
+    if (!name) return;
+    const proj = await createProject(name);
+    await fetchProjects();
+    setProject(proj.id);
+    toast(t('toast.project_created', { n: proj.name }), { gold: true });
+    await refreshProjectMenu();
+    menu.classList.add('hidden');
+  });
+  $('btn-library-refresh')?.addEventListener('click', refreshLibrary);
+}
 
 // ============================================================
 //  Theme toggle
@@ -1787,6 +1927,17 @@ function init() {
   // Theme toggle
   applyTheme(localStorage.getItem('mc-theme') || 'dark');
   $('btn-theme')?.addEventListener('click', toggleTheme);
+
+  // Projects: load list, set current from localStorage, populate library
+  state.project = localStorage.getItem('mc-project') || 'default';
+  bindProjectPicker();
+  fetchProjects().then(() => {
+    const proj = state.projects.find(p => p.id === state.project);
+    if (!proj) state.project = 'default';
+    const display = state.projects.find(p => p.id === state.project);
+    $('project-name').textContent = display?.name || 'Default';
+    refreshLibrary();
+  });
 
   // Language toggle (cycles through registered languages)
   $('btn-lang')?.addEventListener('click', () => {

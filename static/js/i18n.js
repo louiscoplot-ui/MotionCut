@@ -123,6 +123,20 @@ const STRINGS = {
     'toast.project_saved':   'Project saved',
     'toast.project_loaded':  'Project loaded',
     'toast.export_done':     'Export complete',
+
+    // Projects
+    'project.new':           'New project',
+    'project.untitled':      'Untitled project',
+    'project.prompt':        'Project name?',
+    'project.confirm_delete':'Delete this project and all its files?',
+    'library.title':         'Project library',
+    'library.empty':         'No files in this project yet',
+    'library.video':         'video',
+    'library.image':         'image',
+    'library.audio':         'audio',
+    'toast.project_created': 'Project created: {n}',
+    'toast.project_switched':'Switched to: {n}',
+    'toast.project_deleted': 'Project deleted',
   },
 
   // ============================================================
@@ -226,6 +240,19 @@ const STRINGS = {
     'toast.project_saved':   'Projet enregistré',
     'toast.project_loaded':  'Projet chargé',
     'toast.export_done':     'Export terminé',
+
+    'project.new':           'Nouveau projet',
+    'project.untitled':      'Projet sans titre',
+    'project.prompt':        'Nom du projet ?',
+    'project.confirm_delete':'Supprimer ce projet et tous ses fichiers ?',
+    'library.title':         'Bibliothèque du projet',
+    'library.empty':         'Aucun fichier dans ce projet',
+    'library.video':         'vidéo',
+    'library.image':         'image',
+    'library.audio':         'audio',
+    'toast.project_created': 'Projet créé : {n}',
+    'toast.project_switched':'Projet : {n}',
+    'toast.project_deleted': 'Projet supprimé',
   },
 };
 

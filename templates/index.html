@@ -45,6 +45,25 @@
       <h1>Motion<span>Cut</span></h1>
     </div>
     <div class="topbar-divider"></div>
+
+    <!-- Project picker -->
+    <div class="project-picker">
+      <button id="btn-project" class="project-btn" title="Project">
+        <i data-lucide="folder"></i>
+        <span id="project-name">Default</span>
+        <i data-lucide="chevron-down" class="chev"></i>
+      </button>
+      <div id="project-menu" class="project-menu hidden">
+        <div class="project-list" id="project-list"></div>
+        <div class="project-divider"></div>
+        <button id="btn-new-project" class="project-new">
+          <i data-lucide="folder-plus"></i>
+          <span data-i18n="project.new">New project</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="topbar-divider"></div>
     <button id="cmdk-trigger" class="cmdk-trigger" title="Command palette (⌘K)">
       <i data-lucide="search"></i>
       <span data-i18n="topbar.cmdk">Search · run command</span>
@@ -164,6 +183,15 @@
           <div class="dz-title" data-i18n="dz.audio.title">Music</div>
           <input type="file" id="file-audio" accept="audio/*" hidden />
         </div>
+      </div>
+
+      <!-- Library: previously uploaded files in this project -->
+      <div class="library-head">
+        <span class="library-label" data-i18n="library.title">Project library</span>
+        <button id="btn-library-refresh" class="ic-btn xs" title="Refresh"><i data-lucide="refresh-cw"></i></button>
+      </div>
+      <div id="library" class="library">
+        <div class="library-empty muted small" data-i18n="library.empty">No files in this project yet</div>
       </div>
     </section>
 

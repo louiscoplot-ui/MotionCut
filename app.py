@@ -72,6 +72,58 @@ def safe_name(name):
     return name or f"file_{uuid.uuid4().hex}"
 
 
+def safe_project_id(s):
+    s = re.sub(r"[^A-Za-z0-9_\-]", "_", str(s or ""))
+    return s[:80] or "default"
+
+
+def project_dir(pid):
+    """Return path to a project's upload folder, creating it if missing."""
+    pid = safe_project_id(pid)
+    d = UPLOAD_DIR / pid
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def project_display_name(pid):
+    """Strip leading timestamp prefix and tidy underscores → spaces."""
+    name = re.sub(r"^\d{14}_", "", pid)
+    return name.replace("_", " ") or pid
+
+
+def list_projects():
+    out = []
+    for p in sorted(UPLOAD_DIR.iterdir(), key=lambda x: x.name, reverse=True):
+        if not p.is_dir() or p.name.startswith("."):
+            continue
+        files = [f for f in p.iterdir() if f.is_file()]
+        out.append({
+            "id":         p.name,
+            "name":       project_display_name(p.name),
+            "created":    p.stat().st_mtime,
+            "file_count": len(files),
+        })
+    return out
+
+
+def migrate_legacy_uploads():
+    """
+    Move any loose files in uploads/ (from before projects existed) into
+    uploads/default/ so they remain accessible via the new structure.
+    """
+    default = project_dir("default")
+    moved = 0
+    for f in list(UPLOAD_DIR.iterdir()):
+        if f.is_file():
+            try:
+                shutil.move(str(f), str(default / f.name))
+                moved += 1
+            except Exception:
+                pass
+    if moved:
+        print(f"[projects] migrated {moved} legacy file(s) into uploads/default/")
+
+
 def find_ffmpeg():
     exe = shutil.which("ffmpeg")
     if exe:
@@ -255,21 +307,25 @@ def upload():
     if ext not in allowed:
         return jsonify({"error": f"{ext} not allowed for {kind}"}), 400
 
+    project = request.form.get("project") or "default"
+    out_dir = project_dir(project)
+
     fid = uuid.uuid4().hex[:12]
     fname = f"{fid}_{safe_name(f.filename)}"
-    out_path = UPLOAD_DIR / fname
+    out_path = out_dir / fname
     f.save(str(out_path))
 
     duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
 
     return jsonify({
-        "ok": True,
-        "id": fid,
+        "ok":       True,
+        "id":       fid,
+        "project":  safe_project_id(project),
         "filename": fname,
-        "kind": kind,
-        "url": url_for("serve_upload", filename=fname),
+        "kind":     kind,
+        "url":      url_for("serve_project_file", project=safe_project_id(project), filename=fname),
         "duration": duration,
-        "size": out_path.stat().st_size,
+        "size":     out_path.stat().st_size,
     })
 
 
@@ -320,27 +376,93 @@ def upload_chunk():
         part_path.unlink(missing_ok=True)
         return jsonify({"error": f"{ext} not allowed for {kind}"}), 400
 
+    project = request.form.get("project") or "default"
+    out_dir = project_dir(project)
+
     fid = uuid.uuid4().hex[:12]
     fname = f"{fid}_{safe_name(filename)}"
-    out_path = UPLOAD_DIR / fname
+    out_path = out_dir / fname
     shutil.move(str(part_path), str(out_path))
 
     duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
 
     return jsonify({
-        "ok": True,
-        "id": fid,
+        "ok":       True,
+        "id":       fid,
+        "project":  safe_project_id(project),
         "filename": fname,
-        "kind": kind,
-        "url": url_for("serve_upload", filename=fname),
+        "kind":     kind,
+        "url":      url_for("serve_project_file", project=safe_project_id(project), filename=fname),
         "duration": duration,
-        "size": out_path.stat().st_size,
+        "size":     out_path.stat().st_size,
     })
 
 
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
-    return send_from_directory(str(UPLOAD_DIR), filename, conditional=True)
+    """Legacy serve route. Falls back to the default project if the file
+    isn't at the root anymore (post-migration)."""
+    p = UPLOAD_DIR / filename
+    if p.exists():
+        return send_from_directory(str(UPLOAD_DIR), filename, conditional=True)
+    # Try the default project
+    return send_from_directory(str(project_dir("default")), filename, conditional=True)
+
+
+@app.route("/projects/<project>/files/<path:filename>")
+def serve_project_file(project, filename):
+    return send_from_directory(str(project_dir(project)), filename, conditional=True)
+
+
+@app.route("/api/projects", methods=["GET"])
+def api_projects_list():
+    if not list_projects():
+        project_dir("default")  # auto-create
+    return jsonify({"projects": list_projects()})
+
+
+@app.route("/api/projects", methods=["POST"])
+def api_projects_create():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "Untitled").strip()
+    safe = re.sub(r"[^A-Za-z0-9_\-]", "_", name).lower()[:30] or "project"
+    pid = time.strftime("%Y%m%d%H%M%S") + "_" + safe
+    project_dir(pid)
+    return jsonify({"id": pid, "name": name})
+
+
+@app.route("/api/projects/<pid>/files", methods=["GET"])
+def api_project_files(pid):
+    d = project_dir(pid)
+    out = []
+    for f in sorted(d.iterdir(), key=lambda x: -x.stat().st_mtime):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext in ALLOWED_VIDEO:   kind = "video"
+        elif ext in ALLOWED_IMAGE: kind = "image"
+        elif ext in ALLOWED_AUDIO: kind = "audio"
+        else: continue
+        out.append({
+            "name":     f.name,
+            "kind":     kind,
+            "size":     f.stat().st_size,
+            "modified": f.stat().st_mtime,
+            "url":      url_for("serve_project_file", project=safe_project_id(pid), filename=f.name),
+        })
+    return jsonify({"files": out})
+
+
+@app.route("/api/projects/<pid>", methods=["DELETE"])
+def api_projects_delete(pid):
+    d = project_dir(pid)
+    if pid == "default":
+        return jsonify({"error": "cannot delete default project"}), 400
+    try:
+        shutil.rmtree(str(d))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True})
 
 
 @app.route("/exports/<path:filename>")
@@ -622,9 +744,16 @@ def api_export():
     src = data.get("video")
     if not src:
         return jsonify({"error": "missing video"}), 400
-    src_path = UPLOAD_DIR / safe_name(src)
+    project = data.get("project") or "default"
+    pdir = project_dir(project)
+    src_path = pdir / safe_name(src)
     if not src_path.exists():
-        return jsonify({"error": f"source video not found: {src}"}), 404
+        # backward-compat: also check the legacy uploads root
+        legacy = UPLOAD_DIR / safe_name(src)
+        if legacy.exists():
+            src_path = legacy
+        else:
+            return jsonify({"error": f"source video not found: {src}"}), 404
 
     aspect = data.get("aspect", "16:9")
     if aspect == "16:9":
@@ -634,20 +763,22 @@ def api_export():
     else:
         target_w, target_h = 1920, 1080
 
+    def find_in_project(name):
+        if not name: return None
+        n = safe_name(name)
+        cand = pdir / n
+        if cand.exists(): return cand
+        legacy = UPLOAD_DIR / n
+        if legacy.exists(): return legacy
+        return None
+
     image_paths = []
     for layer in data.get("layers", []):
         if layer.get("type") in ("logo", "image"):
-            fname = layer.get("src")
-            if fname:
-                p = UPLOAD_DIR / safe_name(fname)
-                if p.exists():
-                    image_paths.append(p)
+            p = find_in_project(layer.get("src"))
+            if p: image_paths.append(p)
 
-    audio_path = None
-    if data.get("audio"):
-        ap = UPLOAD_DIR / safe_name(data["audio"])
-        if ap.exists():
-            audio_path = ap
+    audio_path = find_in_project(data.get("audio"))
 
     full_duration = probe_duration(src_path)
     in_mark  = data.get("inMark")  or 0
@@ -716,6 +847,10 @@ if __name__ == "__main__":
     print(f" Exports: {EXPORT_DIR}")
     print(" Open http://localhost:5000")
     print("=" * 60)
+    # Migrate any legacy loose files to uploads/default/
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        migrate_legacy_uploads()
+        project_dir("default")  # ensure exists
     # Auto-pull from origin every 15s so the browser refresh always shows the
     # latest commit. Only run in the main process (not in the Werkzeug reloader child).
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
