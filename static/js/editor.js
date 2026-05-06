@@ -44,6 +44,12 @@ const state = {
 
 const history = { stack: [], idx: -1, max: 60 };
 
+const interaction = {
+  pointerDownAt: 0,
+  pointerDownPos: null,
+  pointerDragArmed: false,
+};
+
 // ============================================================
 //  Helpers
 // ============================================================
@@ -262,6 +268,9 @@ async function handleFile(file, kindHint) {
   const kind = kindHint || inferKind(file);
   if (!kind) { toast(`Unsupported file: ${file.name}`); return; }
   const wasVideo = !!state.video;
+  const zoneMap = { video: 'dropzone-video', image: 'dropzone-image', audio: 'dropzone-audio' };
+  const activeZone = $(zoneMap[kind]);
+  activeZone?.classList.add('is-loading');
   try {
     toast(`Uploading ${file.name}…`, { ms: 60000, gold: true });
     const meta = await uploadFile(file, kind, pct => {
@@ -281,6 +290,8 @@ async function handleFile(file, kindHint) {
     refreshLibrary();
   } catch (e) {
     toast(`Error: ${e.message}`);
+  } finally {
+    activeZone?.classList.remove('is-loading');
   }
 }
 
@@ -297,10 +308,11 @@ function applyVideo(meta) {
   $('dropzone-video').querySelector('.dz-title').textContent = meta.filename.slice(0,18);
 }
 function applyLogo(meta) {
-  const img = new Image(); img.crossOrigin = 'anonymous'; img.src = meta.url;
+  const img = new Image(); img.crossOrigin = 'anonymous'; img.decoding = 'async'; img.src = meta.url;
   const layer = makeLogoLayer({ src: meta.filename, url: meta.url, img });
-  img.onload = () => {
-    const r = img.naturalWidth / img.naturalHeight;
+  img.onload = async () => {
+    try { if (img.decode) await img.decode(); } catch {}
+    const r = img.naturalWidth / Math.max(1, img.naturalHeight);
     layer.height = layer.width / r;
     draw();
   };
@@ -595,9 +607,12 @@ function selectAdd(id) {
   }
 }
 
-function onCanvasMouseDown(e) {
+function onCanvasPointerDown(e) {
   if (e.button === 2) return;
   const { x, y } = canvasCoordsFromEvent(e);
+  interaction.pointerDownAt = performance.now();
+  interaction.pointerDownPos = { x, y };
+  interaction.pointerDragArmed = false;
   let hit = null, mode = 'move', corner = null;
   for (let i = state.layers.length - 1; i >= 0; i--) {
     const l = state.layers[i];
@@ -640,8 +655,13 @@ function onCanvasMouseDown(e) {
   renderLayersPanel(); renderInspector(); positionFloatingToolbar(); draw();
 }
 
-function onCanvasMouseMove(e) {
+function onCanvasPointerMove(e) {
   const { x, y } = canvasCoordsFromEvent(e);
+  if (interaction.pointerDownPos && !interaction.pointerDragArmed) {
+    const dx = x - interaction.pointerDownPos.x;
+    const dy = y - interaction.pointerDownPos.y;
+    if (Math.hypot(dx, dy) > 4) interaction.pointerDragArmed = true;
+  }
   if (!drag) {
     const sel = state.layers.find(l => l.id === state.selectedId);
     if (sel) {
@@ -702,8 +722,9 @@ function onCanvasMouseMove(e) {
   draw();
 }
 
-function onCanvasMouseUp() {
+function onCanvasPointerUp() {
   if (drag) { drag = null; clearSnapGuides(); hideDragTooltip(); snapshot(); renderInspector(); }
+  interaction.pointerDownPos = null;
 }
 
 // ============================================================
@@ -1022,6 +1043,8 @@ function deleteLayer(id) {
 }
 function duplicateLayer(id) {
   const l = state.layers.find(L => L.id === id); if (!l) return;
+  const now = performance.now();
+  if (!interaction.pointerDragArmed && now - interaction.pointerDownAt < 180) return;
   const c = JSON.parse(JSON.stringify({...l, img:undefined}));
   c.id = uid(); c.name = (l.name||'Layer') + ' copy'; c.x += 30; c.y += 30;
   if (l.type === 'logo' && l.url) {
