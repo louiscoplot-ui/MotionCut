@@ -290,6 +290,25 @@ def health():
     return jsonify({"ok": True, "ffmpeg": ffmpeg_available()})
 
 
+@app.route("/api/probe", methods=["POST"])
+def api_probe():
+    """Return the duration (in seconds) of an uploaded media file. Used by
+    the editor to refine segment sourceOut after an upload returns a
+    duration of 0 (e.g. when the chunked upload skipped the probe step)."""
+    data = request.get_json(force=True, silent=True) or {}
+    project = data.get("project") or data.get("project_id") or "default"
+    filename = data.get("filename")
+    if not filename:
+        return jsonify({"error": "missing filename"}), 400
+    pdir = project_dir(project)
+    cand = pdir / safe_name(filename)
+    if not cand.exists():
+        legacy = UPLOAD_DIR / safe_name(filename)
+        if legacy.exists(): cand = legacy
+        else: return jsonify({"error": "not found"}), 404
+    return jsonify({"duration": probe_duration(cand) or 0.0, "filename": filename})
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:

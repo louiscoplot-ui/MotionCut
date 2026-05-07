@@ -529,15 +529,29 @@ async function handleFile(file, kindHint) {
     // Swap optimistic refs to server-backed names so exports resolve correctly.
     if (kind === 'video') {
       // Promote the optimistic segment to its server-backed filename and
-      // refine its sourceOut once we know the real duration. Mirror the
-      // change on state.video if this is the segment currently playing.
+      // refine its sourceOut once we know the real duration. The chunked
+      // upload occasionally returns duration=0; in that case we ask the
+      // backend to probe the saved file via /api/probe so segment blocks
+      // never end up with a sentinel 9999 width.
       if (localSegment) {
         localSegment.filename = meta.filename;
         localSegment.url      = meta.url || segmentUrl(meta.filename);
         localSegment._local   = false;
-        const probedDur = +meta.duration || video.duration || (localSegment.sourceOut - localSegment.sourceIn);
+        let probedDur = +meta.duration || 0;
+        if (probedDur <= 0) {
+          try {
+            const r = await fetch('/api/probe', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ project: state.project, filename: meta.filename }),
+            });
+            if (r.ok) probedDur = +(await r.json()).duration || 0;
+          } catch {}
+        }
+        if (probedDur <= 0) probedDur = video.duration || 5; // last-ditch sane default
         localSegment._duration = probedDur;
-        if (localSegment.sourceOut === 9999) localSegment.sourceOut = probedDur;
+        if (localSegment.sourceOut === 9999 || localSegment.sourceOut <= localSegment.sourceIn) {
+          localSegment.sourceOut = localSegment.sourceIn + probedDur;
+        }
         reflowSegments(state.segments);
       }
       if (state.video && state.video.filename === file.name) {
@@ -3294,7 +3308,12 @@ async function refreshLibrary() {
         kind:     it.dataset.kind,
         duration: parseFloat(it.dataset.duration) || 0,
       };
-      e.dataTransfer.setData('application/x-motioncut-lib', JSON.stringify(payload));
+      const json = JSON.stringify(payload);
+      // Set both a custom MIME and text/plain — some browsers (and DnD test
+      // harnesses) only forward standard types, and we'd rather degrade
+      // than refuse the drop.
+      try { e.dataTransfer.setData('application/x-motioncut-lib', json); } catch {}
+      try { e.dataTransfer.setData('text/plain', json); } catch {}
       e.dataTransfer.effectAllowed = 'copy';
     });
   });
@@ -3667,11 +3686,13 @@ function init() {
 
   // Per-zone clicks/drops (for click-to-browse)
   bindDropzone('dropzone-video', 'file-video', 'video');
-  // dropzone-image and btn-add-logo are both the explicit "I am uploading a
-  // logo" entry points — use kindHint 'logo' so they get the corner-overlay
-  // factory regardless of the file's image extension. Window-drop and
-  // library clicks intentionally route to the full-canvas image factory.
-  bindDropzone('dropzone-image', 'file-image', 'logo');
+  // dropzone-image (the right-rail "Add image" zone) and btn-add-logo (image-
+  // plus icon, title "Add image") both add full-canvas image layers — NOT
+  // logos. The only path that produces a small corner logo is the brand-kit
+  // logo picker (brand-logo-pick), which lives in the Brand panel and isn't
+  // touched here. Matches user spec: "Logo is ONLY added via the explicit
+  // Logo button click — NOT by drag-drop".
+  bindDropzone('dropzone-image', 'file-image', 'image');
   bindDropzone('dropzone-audio', 'file-audio', 'audio');
   $('stage-empty-pick')?.addEventListener('click', () => $('file-video').click());
 

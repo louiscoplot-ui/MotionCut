@@ -670,6 +670,26 @@ kbd {
 .tl-seg-menu button:hover { background: var(--s-4); }
 .tl-seg-menu [data-lucide] { width: 14px; height: 14px; }
 
+/* AI Edit discoverability CTA — sits below the tracks once any video segment exists */
+.tl-magic-cta {
+  display: flex; justify-content: center; padding: 10px 8px 6px;
+}
+.tl-magic-cta.hidden { display: none; }
+.cta-magic {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: linear-gradient(135deg, var(--gold-2), var(--gold));
+  color: #1a1a1a; font-weight: 600; font-size: 13px;
+  border: 0; padding: 9px 18px; border-radius: 999px; cursor: pointer;
+  box-shadow: 0 2px 12px rgba(240,192,64,0.35);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.cta-magic:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(240,192,64,0.55);
+}
+.cta-magic [data-lucide] { width: 15px; height: 15px; }
+.cta-magic .cta-meta { opacity: 0.7; font-size: 11px; padding-left: 4px; }
+
 .tl-clip.selected {
   box-shadow: 0 0 0 1.5px var(--gold-2), 0 4px 12px rgba(0,0,0,0.5);
   z-index: 3;

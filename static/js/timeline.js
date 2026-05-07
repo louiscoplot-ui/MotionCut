@@ -79,6 +79,15 @@ function buildDOM() {
             <div class="tl-playhead" id="tl-playhead"></div>
           </div>
         </div>
+        <!-- Discoverability CTA: only shown when segments exist. Clicking it
+             triggers the existing Magic Edit flow (same as topbar btn-magic). -->
+        <div class="tl-magic-cta hidden" id="tl-magic-cta">
+          <button class="cta-magic" id="tl-cta-magic" type="button">
+            <i data-lucide="sparkles"></i>
+            <span class="cta-label">Generate AI Edit</span>
+            <span class="cta-meta mono"></span>
+          </button>
+        </div>
       </div>
     </div>`;
   refreshIcons();
@@ -100,10 +109,22 @@ function render() {
   renderAudioTrack(dur);
   renderBeats(dur);
   renderMarks(dur);
+  renderMagicCta();
   // Reflect snap-beat toggle state
   const sb = $('tl-snap-beat');
   if (sb) sb.classList.toggle('on', !!api.state.snapToBeat);
   updatePlayhead();
+}
+
+function renderMagicCta() {
+  const cta = $('tl-magic-cta');
+  if (!cta) return;
+  const segs = (api?.state?.segments || []).filter(s => s.kind === 'video');
+  if (!segs.length) { cta.classList.add('hidden'); return; }
+  cta.classList.remove('hidden');
+  const meta = cta.querySelector('.cta-meta');
+  if (meta) meta.textContent = `from ${segs.length} clip${segs.length > 1 ? 's' : ''}`;
+  refreshIcons();
 }
 
 function renderBeats(dur) {
@@ -683,28 +704,35 @@ function bindSegmentEvents() {
     tr.classList.add('drag-over');
   });
   tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
-  tr.addEventListener('drop', (e) => {
+  tr.addEventListener('drop', async (e) => {
     tr.classList.remove('drag-over');
     if (!e.dataTransfer) return;
-    let payload = null;
-    try { payload = JSON.parse(e.dataTransfer.getData('application/x-motioncut-lib') || 'null'); } catch {}
+    const payload = readLibraryPayload(e.dataTransfer);
     if (!payload) return;
     e.preventDefault();
-    const meta = {
-      filename: payload.filename, url: payload.url,
-      kind: payload.kind, duration: payload.duration || 0,
-    };
-    if (meta.kind === 'video') {
+    let dur = +payload.duration || 0;
+    // If the library row didn't carry a duration (older session, server probe
+    // returned 0), ask the backend to probe so the segment doesn't render
+    // with a sentinel 9999 width.
+    if (payload.kind === 'video' && dur <= 0) {
+      try {
+        const r = await fetch('/api/probe', {
+          method: 'POST', headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ project: api.state.project, filename: payload.filename }),
+        });
+        if (r.ok) dur = +(await r.json()).duration || 0;
+      } catch {}
+    }
+    if (payload.kind === 'video') {
       api.appendSegment?.({
-        filename: meta.filename, url: meta.url, kind: 'video',
-        sourceIn: 0,
-        sourceOut: meta.duration > 0 ? meta.duration : 9999,
-        _duration: meta.duration || 0,
+        filename: payload.filename, url: payload.url, kind: 'video',
+        sourceIn: 0, sourceOut: dur > 0 ? dur : 5,
+        _duration: dur || 5,
       });
-    } else if (meta.kind === 'image') {
+    } else if (payload.kind === 'image') {
       // Stills get a default 3s on the timeline; user can trim from the right edge.
       api.appendSegment?.({
-        filename: meta.filename, url: meta.url, kind: 'image',
+        filename: payload.filename, url: payload.url, kind: 'image',
         sourceIn: 0, sourceOut: 3, _duration: 3,
       });
     }
@@ -714,7 +742,21 @@ function bindSegmentEvents() {
 }
 
 function hasLibraryPayload(dt) {
-  return Array.from(dt.types || []).includes('application/x-motioncut-lib');
+  // Some browsers normalize the MIME, some don't. Accept either the custom
+  // MIME or the text/plain fallback we set alongside.
+  const types = Array.from(dt.types || []).map(s => (s || '').toLowerCase());
+  return types.includes('application/x-motioncut-lib') || types.includes('text/plain');
+}
+function readLibraryPayload(dt) {
+  for (const mime of ['application/x-motioncut-lib', 'text/plain']) {
+    const raw = dt.getData(mime);
+    if (!raw) continue;
+    try {
+      const p = JSON.parse(raw);
+      if (p && p.filename && p.kind) return p;
+    } catch {}
+  }
+  return null;
 }
 
 function onSegDragMove(e) {
@@ -836,6 +878,11 @@ function init(consumerApi) {
   buildDOM();
   bindEvents();
   bindSegmentEvents();
+  // The CTA delegates to the existing topbar Magic Edit button so the modal,
+  // pre-fill logic, and validation stay in one place.
+  $('tl-cta-magic')?.addEventListener('click', () => {
+    document.getElementById('btn-magic')?.click();
+  });
   // Auto-fit when a video loads
   api.video?.addEventListener('loadedmetadata', () => {
     setTimeout(() => {
