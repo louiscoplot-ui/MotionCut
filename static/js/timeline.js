@@ -208,17 +208,26 @@ function renderVideoTrack(dur) {
   }
   // Multi-clip render. Each segment gets its own block; we add explicit
   // trim handles on the left/right edges. The thin divider between blocks
-  // (the cut) is just two adjacent borders — no extra DOM needed.
+  // (the cut) is just a 2px line dropped between adjacent blocks via the
+  // .tl-cut element below. Each block cycles through 5 colors so users can
+  // visually track which clip is which without reading filenames.
+  const COLOR_COUNT = 5;
+  const last = segs.length - 1;
   tr.innerHTML = segs.map((s, i) => {
     const left = s.timelineIn * pps;
     const w    = Math.max(8, (s.timelineOut - s.timelineIn) * pps);
     const sel  = (s.id === api.state.selectedSegmentId) ? 'is-selected' : '';
     const act  = (s.id === api.state.activeSegmentId)   ? 'is-active'   : '';
+    const colorClass = `clip-c${i % COLOR_COUNT}`;
     const display = (s.filename || 'clip').replace(/^[a-f0-9]{6,16}_/, '').slice(0, 32);
-    const trans = s.transition && s.transition.type !== 'cut' && i < segs.length - 1
+    const trans = s.transition && s.transition.type !== 'cut' && i < last
       ? `<span class="tl-clip-trans" title="${escapeHTML(s.transition.type)} ${(+s.transition.duration||0).toFixed(2)}s"></span>` : '';
+    // Cut marker between this clip and the next. Render it as a separate
+    // sibling so it sits visually on top of both blocks at the boundary.
+    const cut = i < last
+      ? `<div class="tl-cut" style="left:${(s.timelineOut * pps) - 1}px" title="Cut ${i + 1}"></div>` : '';
     return `
-      <div class="tl-clip clip-segment ${sel} ${act}"
+      <div class="tl-clip clip-segment ${colorClass} ${sel} ${act}"
            data-seg-id="${escapeHTML(s.id)}"
            data-kind="${escapeHTML(s.kind || 'video')}"
            style="left:${left}px;width:${w}px">
@@ -228,7 +237,7 @@ function renderVideoTrack(dur) {
         <span class="tl-clip-dur mono">${fmtT(s.timelineOut - s.timelineIn)}</span>
         <span class="tl-trim tl-trim-right" data-trim="right"></span>
         ${trans}
-      </div>`;
+      </div>${cut}`;
   }).join('');
   refreshIcons();
 }
@@ -710,48 +719,73 @@ function bindSegmentEvents() {
   });
 
   // Library drag-to-track. Highlight on dragover, append on drop.
-  tr.addEventListener('dragover', (e) => {
+  // Diagnostics: console.log lines below let you verify the path in DevTools
+  // when something stops working — they're cheap and useful in the field.
+  tr.addEventListener('dragenter', (e) => {
     if (!e.dataTransfer || !hasLibraryPayload(e.dataTransfer)) return;
     e.preventDefault();
+    tr.classList.add('drag-over');
+  });
+  tr.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || !hasLibraryPayload(e.dataTransfer)) return;
+    e.preventDefault();   // critical: without this, drop never fires
     e.dataTransfer.dropEffect = 'copy';
     tr.classList.add('drag-over');
   });
-  tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
+  // dragleave fires when crossing into a child too — only clear the highlight
+  // if the pointer actually exits the track box.
+  tr.addEventListener('dragleave', (e) => {
+    const r = tr.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) {
+      tr.classList.remove('drag-over');
+    }
+  });
   tr.addEventListener('drop', async (e) => {
     tr.classList.remove('drag-over');
     if (!e.dataTransfer) return;
     const payload = readLibraryPayload(e.dataTransfer);
+    console.log('[MC] drop received', payload);
     if (!payload) return;
     e.preventDefault();
-    let dur = +payload.duration || 0;
-    // If the library row didn't carry a duration (older session, server probe
-    // returned 0), ask the backend to probe so the segment doesn't render
-    // with a sentinel 9999 width.
-    if (payload.kind === 'video' && dur <= 0) {
-      try {
-        const r = await fetch('/api/probe', {
-          method: 'POST', headers: { 'Content-Type':'application/json' },
-          body: JSON.stringify({ project: api.state.project, filename: payload.filename }),
-        });
-        if (r.ok) dur = +(await r.json()).duration || 0;
-      } catch {}
-    }
-    if (payload.kind === 'video') {
-      api.appendSegment?.({
-        filename: payload.filename, url: payload.url, kind: 'video',
-        sourceIn: 0, sourceOut: dur > 0 ? dur : 5,
-        _duration: dur || 5,
-      });
-    } else if (payload.kind === 'image') {
-      // Stills get a default 3s on the timeline; user can trim from the right edge.
-      api.appendSegment?.({
-        filename: payload.filename, url: payload.url, kind: 'image',
-        sourceIn: 0, sourceOut: 3, _duration: 3,
-      });
-    }
-    render();
-    api.draw();
+    await appendFromLibraryPayload(payload);
   });
+}
+
+/**
+ * Shared "given this library payload, append a segment" path. Used by both
+ * the drag-drop handler above and the click-to-add fallback in the library
+ * panel. Centralised so they can never drift out of sync.
+ */
+async function appendFromLibraryPayload(payload) {
+  if (!payload || !payload.filename) return;
+  let dur = +payload.duration || 0;
+  if (payload.kind === 'video' && dur <= 0) {
+    // Library row didn't carry a duration — ask the backend to probe so
+    // the new segment doesn't render with a sentinel 9999 width.
+    try {
+      const r = await fetch('/api/probe', {
+        method: 'POST', headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify({ project: api.state.project, filename: payload.filename }),
+      });
+      if (r.ok) dur = +(await r.json()).duration || 0;
+    } catch {}
+  }
+  if (payload.kind === 'video') {
+    api.appendSegment?.({
+      filename: payload.filename, url: payload.url, kind: 'video',
+      sourceIn: 0, sourceOut: dur > 0 ? dur : 5,
+      _duration: dur || 5,
+    });
+  } else if (payload.kind === 'image') {
+    // Stills get a default 3s on the timeline; user can trim from the right edge.
+    api.appendSegment?.({
+      filename: payload.filename, url: payload.url, kind: 'image',
+      sourceIn: 0, sourceOut: 3, _duration: 3,
+    });
+  }
+  render();
+  api.draw();
+  try { await window.MC?.project?.save?.(api.state); } catch {}
 }
 
 function hasLibraryPayload(dt) {

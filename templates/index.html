@@ -97,6 +97,10 @@
 
       <!-- Preview state (shown after the planner returns) -->
       <div id="magic-preview" class="magic-preview hidden"></div>
+
+      <!-- Inline error surface — populated by the Generate handler when
+           /api/auto-edit fails so the user can retry without losing the modal. -->
+      <div id="magic-error" class="magic-error hidden"></div>
     </div>
 
     <div class="magic-foot">
@@ -104,7 +108,7 @@
       <button id="magic-regen"  class="cta-outline hidden">
         <i data-lucide="rotate-ccw"></i><span>Regenerate</span>
       </button>
-      <button id="magic-go" class="cta">
+      <button id="magic-go" class="cta" type="button">
         <i data-lucide="wand-sparkles"></i>
         <span data-i18n="magic.generate">Generate cinematic edit</span>
       </button>

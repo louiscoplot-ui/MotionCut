@@ -391,6 +391,58 @@ function removeSegment(id) {
   draw();
 }
 
+/**
+ * Background probe: ask the backend for the real duration of a just-uploaded
+ * file, then patch any segment / state.video reference whose duration was a
+ * placeholder. Fire-and-forget — never blocks the caller.
+ *
+ * Coalesces concurrent requests for the same filename so dropping 5 copies
+ * of the same clip won't issue 5 redundant probes.
+ */
+const _probeInflight = new Map();
+function probeAndPatch(filename) {
+  if (!filename) return Promise.resolve(0);
+  if (_probeInflight.has(filename)) return _probeInflight.get(filename);
+  const p = (async () => {
+    try {
+      const r = await fetch('/api/probe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: state.project, filename }),
+      });
+      if (!r.ok) return 0;
+      const dur = +((await r.json()).duration) || 0;
+      if (dur <= 0) return 0;
+      let touched = false;
+      for (const s of (state.segments || [])) {
+        if (s.filename === filename) {
+          // Only adjust segments still on placeholder duration. If the user
+          // already trimmed the segment we don't want to widen it back.
+          const wasUntrimmed = (s.sourceIn === 0 && Math.abs(s.sourceOut - (s._duration || 0)) < 0.01);
+          s._duration = dur;
+          if (wasUntrimmed) s.sourceOut = dur;
+          touched = true;
+        }
+      }
+      if (state.video && state.video.filename === filename && (!state.video.duration || state.video.duration <= 0)) {
+        state.video.duration = dur;
+      }
+      if (touched) {
+        reflowSegments(state.segments);
+        try { window.MC?.timeline?.render?.(); } catch {}
+        snapshot();
+      }
+      return dur;
+    } catch (err) {
+      console.warn('[probe]', filename, err);
+      return 0;
+    } finally {
+      _probeInflight.delete(filename);
+    }
+  })();
+  _probeInflight.set(filename, p);
+  return p;
+}
+
 // ============================================================
 //  Upload (with chunked fallback)
 // ============================================================
@@ -528,31 +580,28 @@ async function handleFile(file, kindHint) {
 
     // Swap optimistic refs to server-backed names so exports resolve correctly.
     if (kind === 'video') {
-      // Promote the optimistic segment to its server-backed filename and
-      // refine its sourceOut once we know the real duration. The chunked
-      // upload occasionally returns duration=0; in that case we ask the
-      // backend to probe the saved file via /api/probe so segment blocks
-      // never end up with a sentinel 9999 width.
+      // Promote the optimistic segment to its server-backed filename. The
+      // upload endpoint no longer probes (it blocked the parallel pipeline);
+      // we kick off /api/probe in the background and patch sourceOut /
+      // _duration when it returns. Until then the segment uses the in-page
+      // <video> element's duration as a placeholder so the block has a
+      // sensible width even before the probe lands.
       if (localSegment) {
         localSegment.filename = meta.filename;
         localSegment.url      = meta.url || segmentUrl(meta.filename);
         localSegment._local   = false;
-        let probedDur = +meta.duration || 0;
-        if (probedDur <= 0) {
-          try {
-            const r = await fetch('/api/probe', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ project: state.project, filename: meta.filename }),
-            });
-            if (r.ok) probedDur = +(await r.json()).duration || 0;
-          } catch {}
-        }
-        if (probedDur <= 0) probedDur = video.duration || 5; // last-ditch sane default
-        localSegment._duration = probedDur;
+        const placeholder = +meta.duration || video.duration || 5;
+        localSegment._duration = placeholder;
         if (localSegment.sourceOut === 9999 || localSegment.sourceOut <= localSegment.sourceIn) {
-          localSegment.sourceOut = localSegment.sourceIn + probedDur;
+          localSegment.sourceOut = localSegment.sourceIn + placeholder;
         }
         reflowSegments(state.segments);
+        // Lazy background probe — fires and forgets, patches the segment
+        // (and any other segment that references the same filename) when
+        // the real duration comes back.
+        probeAndPatch(meta.filename);
+      } else {
+        probeAndPatch(meta.filename);   // no segment yet, but cache the duration
       }
       if (state.video && state.video.filename === file.name) {
         state.video.filename = meta.filename;
@@ -817,7 +866,9 @@ function bindDropOverlay() {
     e.preventDefault();
     close();
     const files = [...(e.dataTransfer?.files || [])];
-    for (const f of files) await handleFile(f);
+    // Parallel uploads — Promise.all so 3 dropped videos go up concurrently
+    // instead of waiting for each previous one to finish probing.
+    await Promise.all(files.map(f => handleFile(f).catch(err => console.warn('[upload]', err))));
   });
 }
 
@@ -831,11 +882,12 @@ function bindDropzone(zoneId, inputId, kind) {
     e.preventDefault(); e.stopPropagation();
     zone.classList.remove('over');
     const files = [...(e.dataTransfer?.files || [])];
-    for (const f of files) await handleFile(f, kind);   // ALL files, not just [0]
+    // Parallel uploads (see comment in window-drop handler).
+    await Promise.all(files.map(f => handleFile(f, kind).catch(err => console.warn('[upload]', err))));
   });
   input.addEventListener('change', async () => {
     const files = [...(input.files || [])];
-    for (const f of files) await handleFile(f, kind);
+    await Promise.all(files.map(f => handleFile(f, kind).catch(err => console.warn('[upload]', err))));
     input.value = '';   // allow re-selecting the same file later
   });
 }
@@ -2538,8 +2590,27 @@ function generateMagicEditLocal(opts) {
 function bindMagicEdit() {
   const backdrop = $('magic-backdrop');
   const open = () => {
-    if (!state.video) { toast('Drop a video first to use Magic Edit'); return; }
+    // Allow open as long as the project has anything generative — segments,
+    // a legacy state.video, or even just files in the library (the auto-edit
+    // backend will pick from project files anyway).
+    const hasMedia = (state.segments?.length || 0) > 0 || !!state.video;
+    if (!hasMedia) { toast('Drop a video first to use Magic Edit'); return; }
     backdrop.classList.add('show');
+    // Defensive: force the Generate button visible on every open. Some prior
+    // flow can leave it hidden if the modal was closed mid-loading, and the
+    // user reported it disappearing in the wild. Cheap, idempotent.
+    const go = $('magic-go');
+    if (go) {
+      go.classList.remove('hidden');
+      go.disabled = false;
+      const lbl = go.querySelector('span');
+      if (lbl) lbl.textContent = window.MC?.i18n?.t?.('magic.generate') || 'Generate cinematic edit';
+    }
+    $('magic-apply')?.classList.add('hidden');
+    $('magic-regen')?.classList.add('hidden');
+    $('magic-error')?.classList.add('hidden');
+    hideMagicLoading();
+    $('magic-summary')?.classList.remove('hidden');
     updateMagicSummary();
     refreshIcons();
   };
@@ -2567,16 +2638,43 @@ function bindMagicEdit() {
     });
   });
 
-  $('magic-go')?.addEventListener('click', () => {
+  $('magic-go')?.addEventListener('click', async () => {
+    console.log('[MC] magic-go clicked');
     const opts = {
       duration: document.querySelector('.magic-chips[data-group="duration"] .magic-chip.on')?.dataset.value,
       aspect:   document.querySelector('.magic-chips[data-group="aspect"] .magic-chip.on')?.dataset.value,
       style:    document.querySelector('.magic-chips[data-group="style"] .magic-chip.on')?.dataset.value,
       pacing:   document.querySelector('.magic-chips[data-group="pacing"] .magic-chip.on')?.dataset.value,
     };
+    const go = $('magic-go');
+    const errBox = $('magic-error');
+    if (go) {
+      go.disabled = true;
+      const lbl = go.querySelector('span');
+      if (lbl) lbl.textContent = 'Analyzing clips…';
+    }
+    if (errBox) { errBox.classList.add('hidden'); errBox.textContent = ''; }
     // The modal MUST stay open during the loading + preview phases.
     // It only closes on explicit Apply or Cancel.
-    generateMagicEdit(opts);
+    try {
+      await generateMagicEdit(opts);
+    } catch (err) {
+      // Inline error inside the modal so the user can read + retry without
+      // losing their selections.
+      console.warn('[magic] generate failed', err);
+      if (errBox) {
+        errBox.textContent = 'Could not generate the edit: ' + (err?.message || err);
+        errBox.classList.remove('hidden');
+      } else {
+        toast('Magic Edit failed: ' + (err?.message || err));
+      }
+    } finally {
+      if (go) {
+        go.disabled = false;
+        const lbl = go.querySelector('span');
+        if (lbl) lbl.textContent = window.MC?.i18n?.t?.('magic.generate') || 'Generate cinematic edit';
+      }
+    }
   });
 }
 
@@ -3327,6 +3425,90 @@ async function refreshProjectMenu() {
   });
 }
 
+/**
+ * Small popover anchored to a library row giving the user two simple
+ * actions: "+ Add to timeline" and "▶ Preview". This is the click-based
+ * fallback to drag-and-drop, since real users on real machines hit DnD
+ * edge cases (touch devices, custom pointer drivers, etc.).
+ */
+function showLibraryItemMenu(anchor, meta) {
+  const old = document.getElementById('lib-item-menu');
+  if (old) old.remove();
+  const r = anchor.getBoundingClientRect();
+  const el = document.createElement('div');
+  el.id = 'lib-item-menu';
+  el.className = 'lib-item-menu';
+  el.style.left = Math.round(r.left) + 'px';
+  el.style.top  = Math.round(r.bottom + 4) + 'px';
+  el.innerHTML = `
+    <button data-act="add"><i data-lucide="plus"></i> Add to timeline</button>
+    <button data-act="preview"><i data-lucide="play"></i> Preview</button>
+  `;
+  document.body.appendChild(el);
+  refreshIcons();
+  // Auto-close on outside click / scroll / esc.
+  const close = () => {
+    el.remove();
+    document.removeEventListener('click', onOutside, true);
+    window.removeEventListener('scroll', close, true);
+    window.removeEventListener('keydown', onEsc);
+  };
+  const onOutside = (e) => { if (!el.contains(e.target)) close(); };
+  const onEsc = (e) => { if (e.key === 'Escape') close(); };
+  setTimeout(() => {
+    document.addEventListener('click', onOutside, true);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('keydown', onEsc);
+  }, 0);
+  el.addEventListener('click', async (e) => {
+    const act = e.target.closest('button')?.dataset.act;
+    if (!act) return;
+    if (act === 'add') {
+      // Reuse the timeline's drag-drop append path so click and drag stay
+      // in lockstep. Fetch duration if the row didn't have it cached.
+      let dur = +meta.duration || 0;
+      if (meta.kind === 'video' && dur <= 0) {
+        try {
+          const pr = await fetch('/api/probe', {
+            method: 'POST', headers: { 'Content-Type':'application/json' },
+            body: JSON.stringify({ project: state.project, filename: meta.filename }),
+          });
+          if (pr.ok) dur = +(await pr.json()).duration || 0;
+        } catch {}
+      }
+      if (meta.kind === 'video') {
+        appendSegment({
+          filename: meta.filename, url: meta.url, kind: 'video',
+          sourceIn: 0, sourceOut: dur > 0 ? dur : 5,
+          _duration: dur || 5,
+        });
+        toast('Added to timeline');
+      } else if (meta.kind === 'image') {
+        // Match the drag-drop default: 3s still on the timeline.
+        appendSegment({
+          filename: meta.filename, url: meta.url, kind: 'image',
+          sourceIn: 0, sourceOut: 3, _duration: 3,
+        });
+        toast('Added to timeline');
+      }
+      try { await window.MC?.project?.save?.(state); } catch {}
+    } else if (act === 'preview') {
+      // Image preview = drop a layer on the canvas (same as old click);
+      // video preview = activate it as the current clip without changing segs.
+      if (meta.kind === 'image') applyImageFromLibrary(meta);
+      else if (meta.kind === 'video') {
+        // Use a temporary one-off load: just point the video element at the
+        // file. Doesn't touch state.segments.
+        if (video) {
+          video.src = meta.url;
+          try { video.load(); video.play()?.catch(()=>{}); } catch {}
+        }
+      }
+    }
+    close();
+  });
+}
+
 async function refreshLibrary() {
   const lib = $('library');
   if (!lib) return;
@@ -3370,6 +3552,7 @@ async function refreshLibrary() {
       try { e.dataTransfer.setData('application/x-motioncut-lib', json); } catch {}
       try { e.dataTransfer.setData('text/plain', json); } catch {}
       e.dataTransfer.effectAllowed = 'copy';
+      console.log('[MC] drag start', payload.filename, payload.kind);
     });
   });
   lib.querySelectorAll('.lib-item').forEach(it => {
@@ -3379,13 +3562,12 @@ async function refreshLibrary() {
         filename: it.dataset.name,
         url: it.dataset.url,
         kind: it.dataset.kind,
-        duration: 0,
+        duration: parseFloat(it.dataset.duration) || 0,
       };
-      if (meta.kind === 'video') applyVideo(meta);
-      // Library clicks reuse files already on disk — route images through
-      // the same full-canvas factory as window drops, not the logo path.
-      else if (meta.kind === 'image') applyImageFromLibrary(meta);
-      else if (meta.kind === 'audio') applyMusic(meta);
+      // Audio shortcuts straight through; video/image show a small chooser
+      // so users have a fallback when drag-to-track doesn't work for them.
+      if (meta.kind === 'audio') { applyMusic(meta); return; }
+      showLibraryItemMenu(it, meta);
     });
   });
   lib.querySelectorAll('.lib-del').forEach(btn => {

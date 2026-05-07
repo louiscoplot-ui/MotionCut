@@ -345,8 +345,9 @@ def upload():
     out_path = out_dir / fname
     f.save(str(out_path))
 
-    duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
-
+    # Skip the synchronous probe — it's the slowest step on large files and
+    # blocks the parallel upload pipeline. The frontend calls /api/probe
+    # lazily after the upload returns, then patches segment durations in place.
     return jsonify({
         "ok":       True,
         "id":       fid,
@@ -354,7 +355,7 @@ def upload():
         "filename": fname,
         "kind":     kind,
         "url":      url_for("serve_project_file", project=safe_project_id(project), filename=fname),
-        "duration": duration,
+        "duration": None,
         "size":     out_path.stat().st_size,
     })
 
@@ -414,8 +415,9 @@ def upload_chunk():
     out_path = out_dir / fname
     shutil.move(str(part_path), str(out_path))
 
-    duration = probe_duration(out_path) if kind in ("video", "audio") else 0.0
-
+    # Skip the synchronous probe — it's the slowest step on large files and
+    # blocks the parallel upload pipeline. The frontend calls /api/probe
+    # lazily after the upload returns, then patches segment durations in place.
     return jsonify({
         "ok":       True,
         "id":       fid,
@@ -423,7 +425,7 @@ def upload_chunk():
         "filename": fname,
         "kind":     kind,
         "url":      url_for("serve_project_file", project=safe_project_id(project), filename=fname),
-        "duration": duration,
+        "duration": None,
         "size":     out_path.stat().st_size,
     })
 

@@ -631,6 +631,41 @@ kbd {
   background: rgba(110,168,255,0.14);
   color: #cfe2ff;
 }
+/* Color-cycle: 5 distinct hues so the user can spot which clip is which
+   without reading filenames. The order matches the user's spec. */
+.tl-clip.clip-segment.clip-c0 { border-left-color: #C9A84C; background: rgba(201,168,76,0.18);  color: #f3dfa7; }
+.tl-clip.clip-segment.clip-c1 { border-left-color: #4C7BC9; background: rgba(76,123,201,0.18);  color: #c2d6ff; }
+.tl-clip.clip-segment.clip-c2 { border-left-color: #4CC97B; background: rgba(76,201,123,0.18);  color: #b5edcb; }
+.tl-clip.clip-segment.clip-c3 { border-left-color: #C94C4C; background: rgba(201,76,76,0.18);   color: #f3b8b8; }
+.tl-clip.clip-segment.clip-c4 { border-left-color: #B47ACC; background: rgba(180,122,204,0.18); color: #e0c5ee; }
+/* Thin vertical line between adjacent blocks. Sits as a sibling of the
+   blocks inside the track — not a child — so it isn't clipped by hover/border. */
+.tl-cut {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: rgba(255,255,255,0.85);
+  box-shadow: 0 0 4px rgba(255,255,255,0.45);
+  cursor: col-resize;     /* hint that this is the cut point */
+  pointer-events: auto;
+  z-index: 4;
+}
+.tl-cut:hover { background: var(--gold-2); cursor: col-resize; }
+
+/* Click-popup attached to a library row (Add to timeline / Preview).
+   Same look-and-feel as the segment context menu so the UI feels coherent. */
+.lib-item-menu {
+  position: fixed; z-index: 1100;
+  background: var(--s-2); border: 1px solid var(--s-5);
+  border-radius: 8px; padding: 4px; min-width: 170px;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.55);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.lib-item-menu button {
+  background: transparent; border: 0; color: var(--fg);
+  padding: 7px 10px; text-align: left; border-radius: 5px;
+  display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;
+}
+.lib-item-menu button:hover { background: var(--s-4); }
+.lib-item-menu [data-lucide] { width: 14px; height: 14px; }
 .tl-clip.clip-segment.is-active {
   background: rgba(110,168,255,0.22);
 }
@@ -1685,6 +1720,16 @@ kbd {
   width: auto;
 }
 .magic-foot .cta [data-lucide] { width: 14px; height: 14px; }
+.magic-foot .cta:disabled, .magic-foot .cta[disabled] {
+  opacity: 0.55; cursor: progress; pointer-events: none;
+  box-shadow: none;
+}
+.magic-error {
+  margin: 12px 26px 0; padding: 10px 12px;
+  background: rgba(220,80,80,0.12); color: #ffb6b6;
+  border: 1px solid rgba(220,80,80,0.35); border-radius: 8px;
+  font-size: 13px;
+}
 
 /* Loading state */
 .magic-loading {
