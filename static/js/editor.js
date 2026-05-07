@@ -3296,12 +3296,16 @@ async function refreshLibrary() {
         <i data-lucide="${icon}"></i>
         <span class="lib-name">${escapeHTML(display)}</span>
         <span class="lib-kind">${escapeHTML(t('library.' + f.kind))}</span>
-        <button class="lib-del" data-del="${escapeHTML(f.name)}" title="${escapeHTML(t('library.delete'))}"><i data-lucide="x"></i></button>
+        <button class="lib-del" draggable="false" data-del="${escapeHTML(f.name)}" title="${escapeHTML(t('library.delete'))}"><i data-lucide="x"></i></button>
       </div>`;
   }).join('');
   refreshIcons();
   lib.querySelectorAll('.lib-item[draggable="true"]').forEach(it => {
     it.addEventListener('dragstart', (e) => {
+      // Mousedown on the X (delete) button bubbles up here because the X
+      // lives inside the draggable lib-item. Without this guard the browser
+      // starts a drag and swallows the click — so users can't delete files.
+      if (e.target.closest('.lib-del')) { e.preventDefault(); return; }
       const payload = {
         filename: it.dataset.name,
         url:      it.dataset.url,
@@ -3363,20 +3367,44 @@ async function refreshLibrary() {
           mi.querySelector('span').textContent = tt('style.music.none');
           mi.querySelector('span').classList.add('muted');
         }
-        // If a logo OR image layer used this file, drop it
-        const before = state.layers.length;
-        state.layers = state.layers.filter(l => !((l.type === 'logo' || l.type === 'image') && l.src === name));
-        if (state.layers.length !== before) { renderLayersPanel(); draw(); }
-        // Drop any segments that referenced the now-deleted file. reflow + reactivate.
+        // Drop any layer that referenced the deleted file (logo or image).
+        // Match by src OR by display name, so optimistic layers that haven't
+        // had their src promoted to the server filename yet also get cleaned up.
+        const layersBefore = state.layers.length;
+        state.layers = state.layers.filter(l => {
+          if (l.type !== 'logo' && l.type !== 'image') return true;
+          return l.src !== name && l.name !== name;
+        });
+        const layersChanged = state.layers.length !== layersBefore;
+
+        // Drop any segment referencing the deleted file. We match liberally
+        // (filename OR url contains the name) so an optimistic segment that
+        // never finished its filename swap still gets pruned — that's what
+        // the user reported as orphan blocks staying after a library delete.
         const segsBefore = state.segments.length;
-        state.segments = state.segments.filter(s => s.filename !== name);
-        if (state.segments.length !== segsBefore) {
+        state.segments = state.segments.filter(s => {
+          if (s.filename === name) return false;
+          if (s.url && s.url.indexOf(encodeURIComponent(name)) !== -1) return false;
+          return true;
+        });
+        const segsChanged = state.segments.length !== segsBefore;
+        if (segsChanged) {
           reflowSegments(state.segments);
           if (state.segments[0]) activateSegment(state.segments[0], state.segments[0].sourceIn);
-          else { state.video = null; if (video) { video.removeAttribute('src'); video.load(); } }
-          try { window.MC?.timeline?.render?.(); } catch {}
-          draw();
+          else { state.video = null; if (video) { video.removeAttribute('src'); video.load(); } stageEmpty?.classList.remove('hidden'); }
         }
+
+        // Always re-render and persist after a successful delete: even if no
+        // layer/segment matched, dropzones may need clearing and the doc on
+        // disk must reflect the missing file or a reload restores the orphan.
+        if (layersChanged) renderLayersPanel();
+        try { window.MC?.timeline?.render?.(); } catch {}
+        draw();
+        snapshot();
+        // Bypass the 3s autosave debounce — the deleted file is GONE on the
+        // server, so any subsequent save with stale segment refs would 404
+        // when /api/project/load tries to rebuild image objects.
+        try { await window.MC?.project?.save?.(state); } catch (err) { console.warn('[delete] save after delete failed', err); }
         toast(tt('toast.file_deleted'));
         refreshLibrary();
       } catch (err) {
