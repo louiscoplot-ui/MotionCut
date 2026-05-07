@@ -290,6 +290,40 @@ def health():
     return jsonify({"ok": True, "ffmpeg": ffmpeg_available()})
 
 
+@app.route("/api/thumbnail")
+def api_thumbnail():
+    """Extract a single frame from a project video as a JPEG. Cached on disk
+    next to the source so repeat hits are zero-cost. Browser caches on the
+    URL since project + filename + t are stable."""
+    project = request.args.get("project") or "default"
+    filename = request.args.get("filename")
+    t = float(request.args.get("t") or 0.5)
+    if not filename:
+        return jsonify({"error": "missing filename"}), 400
+    pdir = project_dir(project)
+    src = pdir / safe_name(filename)
+    if not src.exists():
+        legacy = UPLOAD_DIR / safe_name(filename)
+        if legacy.exists(): src = legacy
+        else: return jsonify({"error": "not found"}), 404
+    # Photos are their own thumbnail — just serve them through to spare ffmpeg.
+    if src.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        return send_from_directory(str(src.parent), src.name)
+    # Cache key includes the timestamp, in case we ever expose t > 0 in the UI.
+    cache = pdir / f".thumb_{src.stem}_{int(t*1000)}.jpg"
+    if not cache.exists():
+        cmd = [FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", str(src),
+               "-frames:v", "1", "-vf", "scale=320:-2",
+               "-q:v", "5", str(cache)]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=15)
+        except Exception as e:
+            return jsonify({"error": f"thumbnail failed: {e}"}), 500
+    if not cache.exists():
+        return jsonify({"error": "thumbnail produced no output"}), 500
+    return send_from_directory(str(cache.parent), cache.name)
+
+
 @app.route("/api/probe", methods=["POST"])
 def api_probe():
     """Return the duration (in seconds) of an uploaded media file. Used by
@@ -470,16 +504,30 @@ def api_project_files(pid):
     for f in sorted(d.iterdir(), key=lambda x: -x.stat().st_mtime):
         if not f.is_file():
             continue
+        # Hide internal cache files (thumbnails, etc) from the user-visible
+        # library — they're an implementation detail of /api/thumbnail.
+        if f.name.startswith(".thumb_") or f.name.startswith("."):
+            continue
         ext = f.suffix.lower()
         if ext in ALLOWED_VIDEO:   kind = "video"
         elif ext in ALLOWED_IMAGE: kind = "image"
         elif ext in ALLOWED_AUDIO: kind = "audio"
         else: continue
+        # Probe duration lazily here too — it's the only place we expose it,
+        # and it's a fast probe on cached files. Yes this re-probes on every
+        # listing call; in practice the listing isn't a hot path.
+        duration = 0.0
+        if kind in ("video", "audio"):
+            try:
+                duration = probe_duration(f) or 0.0
+            except Exception:
+                duration = 0.0
         out.append({
             "name":     f.name,
             "kind":     kind,
             "size":     f.stat().st_size,
             "modified": f.stat().st_mtime,
+            "duration": duration,
             "url":      url_for("serve_project_file", project=safe_project_id(pid), filename=f.name),
         })
     return jsonify({"files": out})

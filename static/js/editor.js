@@ -3518,17 +3518,42 @@ async function refreshLibrary() {
     lib.innerHTML = `<div class="library-empty muted small">${escapeHTML(t('library.empty'))}</div>`;
     return;
   }
-  lib.innerHTML = files.map(f => {
-    const icon = f.kind === 'video' ? 'film' : f.kind === 'image' ? 'image' : 'music';
+  // Apply user-saved order if any — files not in the order list go at the end.
+  const orderIdx = new Map(_libOrder.map((n, i) => [n, i]));
+  const orderedFiles = files.slice().sort((a, b) => {
+    const ai = orderIdx.has(a.name) ? orderIdx.get(a.name) : 9999;
+    const bi = orderIdx.has(b.name) ? orderIdx.get(b.name) : 9999;
+    return ai - bi;
+  });
+  // Drop dead names from _libOrder so it doesn't grow forever.
+  _libOrder = orderedFiles.map(f => f.name);
+
+  lib.innerHTML = orderedFiles.map(f => {
     const display = f.name.replace(/^[a-f0-9]{6,16}_/, '');
-    // Videos and images can be dragged onto the timeline's video track to
-    // append a segment. Audio stays click-only — there's no audio-track drop yet.
     const draggable = (f.kind === 'video' || f.kind === 'image') ? 'draggable="true"' : '';
+    const kindBadge = f.kind === 'video' ? 'VIDEO' : f.kind === 'image' ? 'PHOTO' : 'AUDIO';
+    // Thumbnails: photos use the file directly, videos hit the new
+    // /api/thumbnail endpoint (FFmpeg first-frame extraction). For audio
+    // we just show a music icon — no thumbnail.
+    let thumb = '';
+    if (f.kind === 'image') {
+      thumb = `<img class="lib-thumb" src="${escapeHTML(f.url)}" alt="" loading="lazy">`;
+    } else if (f.kind === 'video') {
+      thumb = `<img class="lib-thumb" src="/api/thumbnail?project=${encodeURIComponent(state.project)}&filename=${encodeURIComponent(f.name)}" alt="" loading="lazy" onerror="this.outerHTML='<span class=&quot;lib-thumb fallback&quot;><i data-lucide=&quot;film&quot;></i></span>'">`;
+    } else {
+      thumb = `<span class="lib-thumb fallback"><i data-lucide="music"></i></span>`;
+    }
+    const dur = f.duration > 0 ? `<span class="lib-dur mono">${fmtTime(f.duration)}</span>` : '';
+    const sel = _libSel.has(f.name) ? 'is-selected' : '';
     return `
-      <div class="lib-item" ${draggable} data-name="${escapeHTML(f.name)}" data-url="${escapeHTML(f.url)}" data-kind="${f.kind}" data-duration="${f.duration || 0}" title="${escapeHTML(display)}">
-        <i data-lucide="${icon}"></i>
-        <span class="lib-name">${escapeHTML(display)}</span>
-        <span class="lib-kind">${escapeHTML(t('library.' + f.kind))}</span>
+      <div class="lib-item ${sel}" ${draggable} data-name="${escapeHTML(f.name)}" data-url="${escapeHTML(f.url)}" data-kind="${f.kind}" data-duration="${f.duration || 0}" title="${escapeHTML(display)}">
+        <input type="checkbox" class="lib-check" draggable="false" ${_libSel.has(f.name) ? 'checked' : ''} aria-label="Select">
+        <span class="lib-grip" draggable="false" title="Drag to reorder"><i data-lucide="grip-vertical"></i></span>
+        ${thumb}
+        <div class="lib-text">
+          <span class="lib-name">${escapeHTML(display)}</span>
+          <span class="lib-meta"><span class="lib-badge lib-badge-${f.kind}">${kindBadge}</span>${dur}</span>
+        </div>
         <button class="lib-del" draggable="false" data-del="${escapeHTML(f.name)}" title="${escapeHTML(t('library.delete'))}"><i data-lucide="x"></i></button>
       </div>`;
   }).join('');
@@ -3538,7 +3563,11 @@ async function refreshLibrary() {
       // Mousedown on the X (delete) button bubbles up here because the X
       // lives inside the draggable lib-item. Without this guard the browser
       // starts a drag and swallows the click — so users can't delete files.
-      if (e.target.closest('.lib-del')) { e.preventDefault(); return; }
+      // Bail out for clicks on the X (delete), the checkbox, or the grip
+      // (the last is reserved for SortableJS reorder, not library-to-track).
+      if (e.target.closest('.lib-del') || e.target.closest('.lib-check') || e.target.closest('.lib-grip')) {
+        e.preventDefault(); return;
+      }
       const payload = {
         filename: it.dataset.name,
         url:      it.dataset.url,
@@ -3555,9 +3584,36 @@ async function refreshLibrary() {
       console.log('[MC] drag start', payload.filename, payload.kind);
     });
   });
+  // Checkbox toggles and shift-range. The dragstart guard above already
+  // bails out when the drag originates on .lib-del, .lib-check, or .lib-grip
+  // (see updated guard below).
+  lib.querySelectorAll('.lib-check').forEach(cb => {
+    cb.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const it = cb.closest('.lib-item');
+      const name = it?.dataset?.name;
+      if (!name) return;
+      if (e.shiftKey && _libLastClicked) {
+        // Shift+click: select the contiguous range between last-clicked and this.
+        const all = [...lib.querySelectorAll('.lib-item')].map(x => x.dataset.name);
+        const a = all.indexOf(_libLastClicked);
+        const b = all.indexOf(name);
+        if (a >= 0 && b >= 0) {
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          for (let i = lo; i <= hi; i++) _libSel.add(all[i]);
+        }
+      } else {
+        if (cb.checked) _libSel.add(name); else _libSel.delete(name);
+      }
+      _libLastClicked = name;
+      paintLibrarySelection();
+    });
+  });
   lib.querySelectorAll('.lib-item').forEach(it => {
     it.addEventListener('click', (e) => {
-      if (e.target.closest('.lib-del')) return;     // X click handled separately
+      if (e.target.closest('.lib-del'))   return;     // X click handled separately
+      if (e.target.closest('.lib-check')) return;     // checkbox handles its own
+      if (e.target.closest('.lib-grip'))  return;     // grip is for drag only
       const meta = {
         filename: it.dataset.name,
         url: it.dataset.url,
@@ -3570,6 +3626,21 @@ async function refreshLibrary() {
       showLibraryItemMenu(it, meta);
     });
   });
+  // Sortable for reorder — same library SortableJS already includes for layers.
+  if (window.Sortable) {
+    if (lib._sortable) lib._sortable.destroy();
+    lib._sortable = new Sortable(lib, {
+      animation: 150,
+      handle: '.lib-grip',
+      ghostClass: 'lib-ghost',
+      dragClass: 'lib-dragging',
+      onEnd: () => {
+        _libOrder = [...lib.querySelectorAll('.lib-item')].map(it => it.dataset.name);
+      },
+    });
+  }
+  // Repaint selection class after re-render so visible state matches _libSel.
+  paintLibrarySelection();
   lib.querySelectorAll('.lib-del').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -3645,6 +3716,186 @@ async function refreshLibrary() {
       }
     });
   });
+}
+
+// ============================================================
+//  Media tabs / library multi-select / view toggle / reorder
+// ============================================================
+
+const _libSel = new Set();          // selected library item names
+let   _libLastClicked = null;       // for shift-range select
+let   _libView = (() => { try { return localStorage.getItem('mc-lib-view') || 'list'; } catch { return 'list'; } })();
+let   _libOrder = [];               // user-reordered filenames; persisted in project state at save time
+
+function bindRightRailResize() {
+  const handle = $('right-rail-resize');
+  if (!handle) return;
+  const DEFAULT = 360, MIN = 280, MAX = 500;
+  const apply = (w) => {
+    document.documentElement.style.setProperty('--right-rail-w', `${w}px`);
+    // Auto-switch to grid view when the rail is wide enough.
+    if (w > 380 && _libView === 'list') {
+      _libView = 'grid';
+      try { localStorage.setItem('mc-lib-view', _libView); } catch {}
+      applyLibraryView();
+    }
+  };
+  let saved = parseInt(localStorage.getItem('mc-rail-w') || DEFAULT, 10);
+  if (!Number.isFinite(saved)) saved = DEFAULT;
+  saved = Math.max(MIN, Math.min(MAX, saved));
+  apply(saved);
+  let dragging = false, startX = 0, startW = saved;
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; startX = e.clientX; startW = saved;
+    handle.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    // Drag LEFT = wider rail (because the rail is on the right).
+    const w = Math.max(MIN, Math.min(MAX, startW - (e.clientX - startX)));
+    saved = w;
+    apply(w);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    try { localStorage.setItem('mc-rail-w', String(saved)); } catch {}
+  });
+  handle.addEventListener('dblclick', () => {
+    saved = DEFAULT; apply(DEFAULT);
+    try { localStorage.setItem('mc-rail-w', String(DEFAULT)); } catch {}
+  });
+}
+
+function bindMediaTabs() {
+  // Tab pills swap which media-pane is visible. The tab name doesn't have
+  // to map 1:1 to a kind (e.g. Photo and Logo both upload images), the JS
+  // just toggles the .on classes — kind routing already lives in
+  // bindDropzone calls in init().
+  document.querySelectorAll('.media-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      document.querySelectorAll('.media-tab').forEach(b => b.classList.toggle('on', b === btn));
+      document.querySelectorAll('.media-pane').forEach(p => p.classList.toggle('on', p.dataset.pane === target));
+    });
+  });
+  // View toggle (list / grid / large)
+  document.querySelectorAll('.lib-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _libView = btn.dataset.view;
+      try { localStorage.setItem('mc-lib-view', _libView); } catch {}
+      applyLibraryView();
+    });
+  });
+  applyLibraryView();
+  // Selection-toolbar wiring
+  const bar = $('library-selbar');
+  bar?.querySelector('[data-act="add-all"]')?.addEventListener('click', addAllSelectedToTimeline);
+  bar?.querySelector('[data-act="delete-sel"]')?.addEventListener('click', deleteSelectedFiles);
+  // Cmd/Ctrl+A select-all when the library is focused (or any item is)
+  window.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+      const lib = $('library');
+      if (!lib || !lib.contains(document.activeElement) && !lib.matches(':hover')) return;
+      e.preventDefault();
+      lib.querySelectorAll('.lib-item').forEach(it => _libSel.add(it.dataset.name));
+      paintLibrarySelection();
+    }
+    if (e.key === 'Escape' && _libSel.size) {
+      _libSel.clear(); paintLibrarySelection();
+    }
+  });
+  // Click outside the library deselects
+  document.addEventListener('click', (e) => {
+    if (!_libSel.size) return;
+    const lib = $('library');
+    if (!lib || lib.contains(e.target) || e.target.closest('#library-selbar')) return;
+    _libSel.clear(); paintLibrarySelection();
+  }, true);
+}
+
+function applyLibraryView() {
+  const lib = $('library'); if (!lib) return;
+  lib.dataset.view = _libView;
+  document.querySelectorAll('.lib-view-btn').forEach(b => b.classList.toggle('on', b.dataset.view === _libView));
+}
+
+function paintLibrarySelection() {
+  const lib = $('library'); if (!lib) return;
+  lib.querySelectorAll('.lib-item').forEach(it => {
+    const sel = _libSel.has(it.dataset.name);
+    it.classList.toggle('is-selected', sel);
+    const cb = it.querySelector('.lib-check');
+    if (cb) cb.checked = sel;
+  });
+  const bar = $('library-selbar');
+  if (!bar) return;
+  if (_libSel.size === 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  const cnt = bar.querySelector('.selbar-count strong');
+  if (cnt) cnt.textContent = _libSel.size;
+}
+
+async function addAllSelectedToTimeline() {
+  if (!_libSel.size) return;
+  // Iterate in current visual order so "add all" matches the user's
+  // reordered library list, not insertion-time order.
+  const lib = $('library');
+  const ordered = [...lib.querySelectorAll('.lib-item')]
+    .filter(it => _libSel.has(it.dataset.name))
+    .map(it => ({
+      filename: it.dataset.name, url: it.dataset.url,
+      kind: it.dataset.kind, duration: parseFloat(it.dataset.duration) || 0,
+    }));
+  for (const meta of ordered) {
+    let dur = +meta.duration || 0;
+    if (meta.kind === 'video' && dur <= 0) dur = await probeAndPatch(meta.filename) || 0;
+    if (meta.kind === 'video') {
+      appendSegment({
+        filename: meta.filename, url: meta.url, kind: 'video',
+        sourceIn: 0, sourceOut: dur > 0 ? dur : 5, _duration: dur || 5,
+      });
+    } else if (meta.kind === 'image') {
+      appendSegment({
+        filename: meta.filename, url: meta.url, kind: 'image',
+        sourceIn: 0, sourceOut: 3, _duration: 3,
+      });
+    } else if (meta.kind === 'audio') {
+      applyMusic(meta);
+    }
+  }
+  _libSel.clear(); paintLibrarySelection();
+  toast(`Added ${ordered.length} clip${ordered.length > 1 ? 's' : ''} to timeline`);
+  try { await window.MC?.project?.save?.(state); } catch {}
+}
+
+async function deleteSelectedFiles() {
+  if (!_libSel.size) return;
+  if (!confirm(`Delete ${_libSel.size} file${_libSel.size > 1 ? 's' : ''}? This cannot be undone.`)) return;
+  const names = [...(_libSel)];
+  let okCount = 0;
+  for (const name of names) {
+    try {
+      const r = await fetch('/api/projects/' + encodeURIComponent(state.project) + '/files/' + encodeURIComponent(name), { method: 'DELETE' });
+      if (r.ok) okCount++;
+    } catch {}
+    // Drop layers + segments referencing this file (mirrors single-delete).
+    state.layers   = state.layers.filter(l => !((l.type === 'logo' || l.type === 'image') && (l.src === name || l.name === name)));
+    state.segments = state.segments.filter(s => s.filename !== name);
+  }
+  reflowSegments(state.segments);
+  if (state.segments[0]) activateSegment(state.segments[0], state.segments[0].sourceIn);
+  else { state.video = null; if (video) { video.removeAttribute('src'); video.load(); } stageEmpty?.classList.remove('hidden'); }
+  renderLayersPanel();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  draw();
+  snapshot();
+  try { await window.MC?.project?.save?.(state); } catch {}
+  _libSel.clear(); paintLibrarySelection();
+  toast(`Deleted ${okCount} file${okCount > 1 ? 's' : ''}`);
+  refreshLibrary();
 }
 
 function bindProjectPicker() {
@@ -3947,14 +4198,13 @@ function init() {
 
   // Per-zone clicks/drops (for click-to-browse)
   bindDropzone('dropzone-video', 'file-video', 'video');
-  // dropzone-image (the right-rail "Add image" zone) and btn-add-logo (image-
-  // plus icon, title "Add image") both add full-canvas image layers — NOT
-  // logos. The only path that produces a small corner logo is the brand-kit
-  // logo picker (brand-logo-pick), which lives in the Brand panel and isn't
-  // touched here. Matches user spec: "Logo is ONLY added via the explicit
-  // Logo button click — NOT by drag-drop".
-  bindDropzone('dropzone-image', 'file-image', 'image');
+  // Photo tab (NEW): full-canvas image layer route — same as window-drop.
+  bindDropzone('dropzone-photo', 'file-photo', 'image');
+  // Logo tab: dedicated brand-logo path (small corner overlay).
+  bindDropzone('dropzone-image', 'file-image', 'logo');
   bindDropzone('dropzone-audio', 'file-audio', 'audio');
+  bindMediaTabs();
+  bindRightRailResize();
   $('stage-empty-pick')?.addEventListener('click', () => $('file-video').click());
 
   // Add layer buttons

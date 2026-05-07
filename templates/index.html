@@ -249,38 +249,78 @@
   </section>
 
   <!-- ===== RIGHT RAIL ===== -->
-  <aside class="rail">
+  <aside class="rail right-rail" id="right-rail">
+    <div class="right-rail-resize" id="right-rail-resize" title="Drag to resize · double-click to reset"></div>
 
     <!-- ===== MEDIA ===== -->
     <section class="panel">
       <div class="panel-head">
         <h2><i data-lucide="upload" class="head-icon"></i><span data-i18n="panel.media">Media</span></h2>
       </div>
-      <div id="dropzone-video" class="dropzone hero">
-        <i data-lucide="film" class="dz-icon"></i>
-        <div class="dz-title" data-i18n="dz.video.title">Video</div>
-        <div class="dz-sub" data-i18n="dz.video.sub">MP4 · MOV · WebM</div>
-        <input type="file" id="file-video" accept="video/*" hidden />
+
+      <!-- Pill tabs that switch between the four upload zones below -->
+      <div class="media-tabs" role="tablist">
+        <button class="media-tab on" data-tab="video" type="button" role="tab"><i data-lucide="film"></i><span>Video</span></button>
+        <button class="media-tab"    data-tab="photo" type="button" role="tab"><i data-lucide="image"></i><span>Photo</span></button>
+        <button class="media-tab"    data-tab="logo"  type="button" role="tab"><i data-lucide="bookmark"></i><span>Logo</span></button>
+        <button class="media-tab"    data-tab="music" type="button" role="tab"><i data-lucide="music"></i><span>Music</span></button>
       </div>
-      <div class="dz-row">
-        <div id="dropzone-image" class="dropzone slim">
-          <i data-lucide="image" class="dz-icon"></i>
-          <div class="dz-title" data-i18n="dz.logo.title">Logo</div>
-          <input type="file" id="file-image" accept="image/*" hidden />
+
+      <!-- One dropzone per tab; .media-pane.on is shown, others hidden -->
+      <div class="media-panes">
+        <div class="media-pane on" data-pane="video">
+          <div id="dropzone-video" class="dropzone hero">
+            <i data-lucide="film" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.video.title">Drop videos here</div>
+            <div class="dz-sub">MP4 · MOV · WebM up to 2GB</div>
+            <input type="file" id="file-video" accept="video/*" multiple hidden />
+          </div>
         </div>
-        <div id="dropzone-audio" class="dropzone slim">
-          <i data-lucide="music" class="dz-icon"></i>
-          <div class="dz-title" data-i18n="dz.audio.title">Music</div>
-          <input type="file" id="file-audio" accept="audio/*" hidden />
+        <div class="media-pane" data-pane="photo">
+          <div id="dropzone-photo" class="dropzone hero">
+            <i data-lucide="image" class="dz-icon"></i>
+            <div class="dz-title">Drop photos here</div>
+            <div class="dz-sub">JPG · PNG · WebP · GIF</div>
+            <input type="file" id="file-photo" accept=".jpg,.jpeg,.png,.webp,.gif,image/*" multiple hidden />
+          </div>
+        </div>
+        <div class="media-pane" data-pane="logo">
+          <div id="dropzone-image" class="dropzone hero">
+            <i data-lucide="bookmark" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.logo.title">Upload your brand logo</div>
+            <div class="dz-sub">Adds a positioned overlay</div>
+            <input type="file" id="file-image" accept="image/*" hidden />
+          </div>
+        </div>
+        <div class="media-pane" data-pane="music">
+          <div id="dropzone-audio" class="dropzone hero">
+            <i data-lucide="music" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.audio.title">Drop a music track</div>
+            <div class="dz-sub">MP3 · WAV · M4A</div>
+            <input type="file" id="file-audio" accept="audio/*" hidden />
+          </div>
         </div>
       </div>
 
       <!-- Library: previously uploaded files in this project -->
       <div class="library-head">
         <span class="library-label" data-i18n="library.title">Project library</span>
+        <span class="library-grow"></span>
+        <div class="library-view-toggle" role="group" aria-label="Library view">
+          <button class="lib-view-btn on" data-view="list"  title="List view"><i data-lucide="list"></i></button>
+          <button class="lib-view-btn"    data-view="grid"  title="Grid view"><i data-lucide="grid-3x3"></i></button>
+          <button class="lib-view-btn"    data-view="large" title="Large grid"><i data-lucide="layout-grid"></i></button>
+        </div>
         <button id="btn-library-refresh" class="ic-btn xs" title="Refresh"><i data-lucide="refresh-cw"></i></button>
       </div>
-      <div id="library" class="library">
+      <!-- Selection toolbar (slides down when items are selected) -->
+      <div id="library-selbar" class="library-selbar hidden">
+        <span class="selbar-count"><strong>0</strong> selected</span>
+        <span class="selbar-grow"></span>
+        <button class="selbar-btn" data-act="add-all" title="Add all to timeline"><i data-lucide="plus"></i><span>Add all</span></button>
+        <button class="selbar-btn danger" data-act="delete-sel" title="Delete selected"><i data-lucide="trash-2"></i><span>Delete</span></button>
+      </div>
+      <div id="library" class="library" data-view="list">
         <div class="library-empty muted small" data-i18n="library.empty">No files in this project yet</div>
       </div>
     </section>
