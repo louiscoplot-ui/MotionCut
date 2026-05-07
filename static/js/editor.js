@@ -3126,6 +3126,57 @@ function restoreFromDocument(doc) {
   try { window.MC?.timeline?.render?.(); } catch {}
   draw();
   toast('Project restored', { gold: true });
+  // Async garbage-collect any segments / image-layers whose source file is
+  // no longer on disk. Fires after the initial paint so the user sees the
+  // restored state first, then ghosts vanish silently a moment later.
+  purgeGhostMedia().catch(err => console.warn('[restore] purge failed', err));
+}
+
+/**
+ * Cross-check state.segments and state.layers against the project's file
+ * listing on the server. Anything referencing a file that no longer exists
+ * is dropped from state, the timeline is reflowed, and the cleaned doc is
+ * saved immediately so a subsequent reload can't re-summon the ghost.
+ *
+ * Safe to call as a no-op when the project is empty or every segment
+ * still resolves — the bail-out paths skip the network round-trip when
+ * there's nothing to check.
+ */
+async function purgeGhostMedia() {
+  if (!state.segments?.length && !state.layers?.length) return;
+  let known;
+  try {
+    const r = await fetch('/api/projects/' + encodeURIComponent(state.project) + '/files');
+    if (!r.ok) return;
+    const data = await r.json();
+    known = new Set((data.files || []).map(f => f.name));
+  } catch {
+    return;   // network error — better to leave state alone than wrongly purge
+  }
+  const segsBefore = state.segments.length;
+  state.segments = state.segments.filter(s => !s.filename || known.has(s.filename));
+  const segsChanged = state.segments.length !== segsBefore;
+
+  const layersBefore = state.layers.length;
+  state.layers = state.layers.filter(l => {
+    if ((l.type !== 'logo' && l.type !== 'image') || !l.src) return true;
+    return known.has(l.src);
+  });
+  const layersChanged = state.layers.length !== layersBefore;
+
+  if (!segsChanged && !layersChanged) return;
+  if (segsChanged) {
+    reflowSegments(state.segments);
+    if (state.segments[0]) activateSegment(state.segments[0], state.segments[0].sourceIn);
+    else { state.video = null; if (video) { video.removeAttribute('src'); video.load(); } stageEmpty?.classList.remove('hidden'); }
+  }
+  if (layersChanged) renderLayersPanel();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  draw();
+  snapshot();
+  try { await window.MC?.project?.save?.(state); } catch (err) { console.warn('[purge] save failed', err); }
+  const dropped = (segsBefore - state.segments.length) + (layersBefore - state.layers.length);
+  if (dropped > 0) toast(`Cleaned ${dropped} missing-file reference${dropped > 1 ? 's' : ''}`);
 }
 function loadProjectFile(file) {
   const reader = new FileReader();

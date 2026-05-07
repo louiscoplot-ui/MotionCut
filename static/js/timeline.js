@@ -62,7 +62,12 @@ function buildDOM() {
       <div class="tl-body">
         <div class="tl-headers">
           <div class="tl-ruler-spacer"></div>
-          <div class="tl-header" data-kind="video"><i data-lucide="film"></i><span>Video</span></div>
+          <div class="tl-header" data-kind="video">
+            <i data-lucide="film"></i><span>Video</span>
+            <button class="tl-header-act" id="tl-clear-video" title="Clear all clips from the timeline" type="button">
+              <i data-lucide="x"></i>
+            </button>
+          </div>
           <div class="tl-header" data-kind="overlay"><i data-lucide="layers"></i><span>Overlays</span></div>
           <div class="tl-header" data-kind="audio"><i data-lucide="music-2"></i><span>Audio</span></div>
         </div>
@@ -110,6 +115,7 @@ function render() {
   renderBeats(dur);
   renderMarks(dur);
   renderMagicCta();
+  renderClearTimelineBtn();
   // Reflect snap-beat toggle state
   const sb = $('tl-snap-beat');
   if (sb) sb.classList.toggle('on', !!api.state.snapToBeat);
@@ -125,6 +131,13 @@ function renderMagicCta() {
   const meta = cta.querySelector('.cta-meta');
   if (meta) meta.textContent = `from ${segs.length} clip${segs.length > 1 ? 's' : ''}`;
   refreshIcons();
+}
+
+function renderClearTimelineBtn() {
+  const btn = $('tl-clear-video');
+  if (!btn) return;
+  const has = (api?.state?.segments?.length || 0) > 0;
+  btn.classList.toggle('hidden', !has);
 }
 
 function renderBeats(dur) {
@@ -808,7 +821,7 @@ function showSegmentMenu(x, y, segId) {
   menu.className = 'tl-seg-menu';
   menu.style.left = x + 'px'; menu.style.top = y + 'px';
   menu.innerHTML = `
-    <button data-act="remove"><i data-lucide="trash-2"></i> Remove clip</button>
+    <button data-act="remove"><i data-lucide="trash-2"></i> Remove from timeline</button>
     <button data-act="set-in"><i data-lucide="log-in"></i> Set in here</button>
     <button data-act="set-out"><i data-lucide="log-out"></i> Set out here</button>
   `;
@@ -882,6 +895,20 @@ function init(consumerApi) {
   // pre-fill logic, and validation stay in one place.
   $('tl-cta-magic')?.addEventListener('click', () => {
     document.getElementById('btn-magic')?.click();
+  });
+  // Escape hatch when ghost segments persist or a user wants to start fresh.
+  $('tl-clear-video')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!api.state.segments?.length) return;
+    if (!confirm('Remove all clips from the timeline?')) return;
+    api.state.segments = [];
+    api.state.activeSegmentId = null;
+    api.state.selectedSegmentId = null;
+    api.state.video = null;
+    if (api.video) { api.video.removeAttribute('src'); try { api.video.load(); } catch {} }
+    api.snapshot();
+    try { window.MC?.project?.save?.(api.state); } catch {}
+    render(); api.draw(); api.renderLayersPanel?.();
   });
   // Auto-fit when a video loads
   api.video?.addEventListener('loadedmetadata', () => {
