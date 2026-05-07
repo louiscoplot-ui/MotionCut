@@ -125,10 +125,10 @@ window.addEventListener('resize', () => { resizeCanvas(); draw(); });
 // ============================================================
 //  Layer factories
 // ============================================================
-let _layerCounter = { text: 0, logo: 0, color: 0 };
+let _layerCounter = { text: 0, logo: 0, color: 0, image: 0 };
 function nextName(type) {
   _layerCounter[type] = (_layerCounter[type] || 0) + 1;
-  const labels = { text: 'Text', logo: 'Logo', color: 'Overlay' };
+  const labels = { text: 'Text', logo: 'Logo', color: 'Overlay', image: 'Image' };
   return `${labels[type]} ${_layerCounter[type]}`;
 }
 
@@ -157,6 +157,27 @@ function makeLogoLayer(opts={}) {
     opacity: 1, blendMode: 'source-over',
     src: null, url: null, img: null,
     x: 60, y: 60, width: 240, height: 240,
+    rotation: 0,
+    start: 0, end: 9999,
+  }, opts);
+}
+// Photos & illustrations dropped onto the canvas (or added from the project
+// library) become 'image' layers — full-canvas by default when there's no
+// video, or a large centered overlay when a video is already loaded. This is
+// distinct from 'logo' layers (small, corner-positioned, set via the
+// dedicated Logo button in the right rail).
+function makeImageLayer(opts={}) {
+  const w = opts.width  || canvasW;
+  const h = opts.height || canvasH;
+  return Object.assign({
+    id: uid(), type: 'image',
+    name: opts.name || nextName('image'),
+    visible: true, locked: false,
+    opacity: 1, blendMode: 'source-over',
+    src: null, url: null, img: null,
+    x: (canvasW - w) / 2,
+    y: (canvasH - h) / 2,
+    width: w, height: h,
     rotation: 0,
     start: 0, end: 9999,
   }, opts);
@@ -282,9 +303,16 @@ function inferKind(file) {
 }
 
 async function handleFile(file, kindHint) {
+  // Routing rules:
+  //   - kindHint 'logo'  -> small corner logo overlay (right-rail dropzone, btn-add-logo)
+  //   - kindHint 'image' or no hint + image extension -> full-canvas image layer
+  //     (window drops, library clicks, generic API callers)
+  //   - kindHint 'video' / 'audio' -> respective tracks
   const kind = kindHint || inferKind(file);
   if (!kind) { toast(`Unsupported file: ${file.name}`); return; }
   const wasVideo = !!state.video;
+  // 'logo' is a UI intent, not a file kind — the server only knows 'image'.
+  const uploadKind = kind === 'logo' ? 'image' : kind;
 
   // ----- OPTIMISTIC: instant local preview before upload finishes -----
   // Uses object URLs so the user sees their content within ~16ms instead of
@@ -292,28 +320,61 @@ async function handleFile(file, kindHint) {
   // filename reference to the server-side name (so exports work) but keep
   // the local URL playing in the <video> element — no re-buffer.
   let localUrl = null;
+  let localLayer = null;
   if (kind === 'video') {
     localUrl = URL.createObjectURL(file);
     applyVideo({ filename: file.name, url: localUrl, kind: 'video', duration: 0, _local: true });
-  } else if (kind === 'image') {
+  } else if (kind === 'logo') {
+    // Explicit logo intent: small corner overlay, original sizing rules.
     localUrl = URL.createObjectURL(file);
     const img = new Image(); img.src = localUrl;
-    const layer = makeLogoLayer({ src: file.name, url: localUrl, img, _local: true });
+    localLayer = makeLogoLayer({ src: file.name, url: localUrl, img, _local: true });
     img.onload = () => {
       const r = img.naturalWidth / img.naturalHeight;
-      layer.height = layer.width / r;
+      localLayer.height = localLayer.width / r;
       draw();
     };
-    state.layers.push(layer);
-    state.selectedId = layer.id;
-    $('dropzone-image').classList.add('has-file');
+    state.layers.push(localLayer);
+    state.selectedId = localLayer.id;
+    $('dropzone-image')?.classList.add('has-file');
+    renderLayersPanel(); renderInspector(); positionFloatingToolbar(); snapshot(); draw();
+  } else if (kind === 'image') {
+    // Full-canvas (or large centered) image — like a still frame in a NLE.
+    localUrl = URL.createObjectURL(file);
+    const img = new Image(); img.src = localUrl;
+    const empty = !state.video;
+    // Empty stage: cover the full canvas. Stage already has a video: 80% wide
+    // centered overlay so the user can see it sits on top, not replacing.
+    const w = empty ? canvasW : Math.round(canvasW * 0.8);
+    const h = empty ? canvasH : Math.round(canvasH * 0.8);
+    localLayer = makeImageLayer({
+      src: file.name, url: localUrl, img, _local: true,
+      name: file.name,
+      width: w, height: h,
+    });
+    img.onload = () => {
+      // Preserve the source aspect ratio inside the chosen bounding box.
+      const ar = img.naturalWidth / img.naturalHeight;
+      const boxAr = w / h;
+      if (ar > boxAr) {
+        // image is wider than box -> fit width
+        localLayer.height = Math.round(localLayer.width / ar);
+      } else {
+        localLayer.width = Math.round(localLayer.height * ar);
+      }
+      localLayer.x = Math.round((canvasW - localLayer.width) / 2);
+      localLayer.y = Math.round((canvasH - localLayer.height) / 2);
+      draw();
+    };
+    state.layers.push(localLayer);
+    state.selectedId = localLayer.id;
     renderLayersPanel(); renderInspector(); positionFloatingToolbar(); snapshot(); draw();
   }
 
   // ----- Background upload via the queue widget -----
-  const queueId = uploadQueueAdd(file.name, kind);
+  const queueId = uploadQueueAdd(file.name, uploadKind);
   try {
-    const meta = await uploadFile(file, kind, pct => uploadQueueProgress(queueId, pct));
+    const meta = await uploadFile(file, uploadKind, pct => uploadQueueProgress(queueId, pct));
     uploadQueueDone(queueId);
 
     // Swap optimistic refs to server-backed names so exports resolve correctly.
@@ -327,10 +388,11 @@ async function handleFile(file, kindHint) {
       // Re-snapshot now that the server filename is set — without this the
       // autosave debounce could fire with the OLD local filename in scope.
       snapshot();
-    } else if (kind === 'image') {
-      const lay = state.layers.find(l => l._local && l.src === file.name && l.type === 'logo');
-      if (lay) { lay.src = meta.filename; lay._local = false; }
-      toast(`Logo added: ${file.name}`);
+    } else if (kind === 'logo' || kind === 'image') {
+      // Match by the layer reference we created above so we don't accidentally
+      // rename a same-named pre-existing layer.
+      if (localLayer) { localLayer.src = meta.filename; localLayer._local = false; }
+      toast(kind === 'logo' ? `Logo added: ${file.name}` : `Image added: ${file.name}`);
       snapshot();
     } else if (kind === 'audio') {
       applyMusic(meta);
@@ -354,6 +416,32 @@ function applyVideo(meta) {
   };
   $('dropzone-video').classList.add('has-file');
   $('dropzone-video').querySelector('.dz-title').textContent = meta.filename.slice(0,18);
+}
+function applyImageFromLibrary(meta) {
+  // Library re-add path: file already lives on the server, so no upload — just
+  // build the full-canvas / 80%-overlay layer immediately.
+  const img = new Image(); img.crossOrigin = 'anonymous'; img.src = meta.url;
+  const empty = !state.video;
+  const w = empty ? canvasW : Math.round(canvasW * 0.8);
+  const h = empty ? canvasH : Math.round(canvasH * 0.8);
+  const display = (meta.filename || '').replace(/^[a-f0-9]{6,16}_/, '');
+  const layer = makeImageLayer({
+    src: meta.filename, url: meta.url, img,
+    name: display || nextName('image'),
+    width: w, height: h,
+  });
+  img.onload = () => {
+    const ar = img.naturalWidth / img.naturalHeight;
+    const boxAr = w / h;
+    if (ar > boxAr) layer.height = Math.round(layer.width / ar);
+    else            layer.width  = Math.round(layer.height * ar);
+    layer.x = Math.round((canvasW - layer.width)  / 2);
+    layer.y = Math.round((canvasH - layer.height) / 2);
+    draw();
+  };
+  state.layers.push(layer);
+  state.selectedId = layer.id;
+  renderLayersPanel(); renderInspector(); positionFloatingToolbar(); snapshot(); draw();
 }
 function applyLogo(meta) {
   const img = new Image(); img.crossOrigin = 'anonymous'; img.src = meta.url;
@@ -1202,7 +1290,7 @@ function draw() {
   if (state.letterbox) drawLetterbox();
   for (const l of state.layers) {
     if (l.type === 'text')  drawTextLayer(l, t);
-    else if (l.type === 'logo') drawLogoLayer(l, t);
+    else if (l.type === 'logo' || l.type === 'image') drawLogoLayer(l, t);
     else if (l.type === 'color') drawColorLayer(l, t);
   }
   if (state.fx.vignette) drawVignette();
@@ -1244,7 +1332,10 @@ function positionFloatingToolbar() {
 //  Layers panel
 // ============================================================
 function typeIcon(t) {
-  return t === 'text' ? 'type' : t === 'logo' ? 'image' : 'square';
+  if (t === 'text')  return 'type';
+  if (t === 'image') return 'image';
+  if (t === 'logo')  return 'bookmark';   // distinct from image so users can tell them apart in the panel
+  return 'square';
 }
 function typeClass(t) { return 't-' + t; }
 
@@ -1427,7 +1518,7 @@ function renderInspector() {
           <select data-prop="align">${['left','center','right'].map(a=>`<option ${a===l.align?'selected':''}>${a}</option>`).join('')}</select></label>
       </div>
       <label class="row no-scrub"><span class="no-scrub">Color</span><input type="color" data-prop="color" value="${l.color}"/></label>`;
-  } else if (l.type === 'logo') {
+  } else if (l.type === 'logo' || l.type === 'image') {
     html += `
       <div class="row-grid-2">
         <label class="row col"><span data-scrub="width">W</span><input type="number" data-prop="width" value="${Math.round(l.width)}"/></label>
@@ -3018,7 +3109,9 @@ async function refreshLibrary() {
         duration: 0,
       };
       if (meta.kind === 'video') applyVideo(meta);
-      else if (meta.kind === 'image') applyLogo(meta);
+      // Library clicks reuse files already on disk — route images through
+      // the same full-canvas factory as window drops, not the logo path.
+      else if (meta.kind === 'image') applyImageFromLibrary(meta);
       else if (meta.kind === 'audio') applyMusic(meta);
     });
   });
@@ -3052,9 +3145,9 @@ async function refreshLibrary() {
           mi.querySelector('span').textContent = tt('style.music.none');
           mi.querySelector('span').classList.add('muted');
         }
-        // If a logo layer used this file, drop it
+        // If a logo OR image layer used this file, drop it
         const before = state.layers.length;
-        state.layers = state.layers.filter(l => !(l.type === 'logo' && l.src === name));
+        state.layers = state.layers.filter(l => !((l.type === 'logo' || l.type === 'image') && l.src === name));
         if (state.layers.length !== before) { renderLayersPanel(); draw(); }
         toast(tt('toast.file_deleted'));
         refreshLibrary();
@@ -3362,7 +3455,11 @@ function init() {
 
   // Per-zone clicks/drops (for click-to-browse)
   bindDropzone('dropzone-video', 'file-video', 'video');
-  bindDropzone('dropzone-image', 'file-image', 'image');
+  // dropzone-image and btn-add-logo are both the explicit "I am uploading a
+  // logo" entry points — use kindHint 'logo' so they get the corner-overlay
+  // factory regardless of the file's image extension. Window-drop and
+  // library clicks intentionally route to the full-canvas image factory.
+  bindDropzone('dropzone-image', 'file-image', 'logo');
   bindDropzone('dropzone-audio', 'file-audio', 'audio');
   $('stage-empty-pick')?.addEventListener('click', () => $('file-video').click());
 

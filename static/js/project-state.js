@@ -102,7 +102,7 @@ const SCHEMA_VERSION = 1;
 /**
  * @typedef {Object} Layer
  * @property {string}   id
- * @property {('text'|'logo'|'color')} type
+ * @property {('text'|'logo'|'color'|'image')} type
  * @property {string}   [name]
  * @property {boolean}  [visible]
  * @property {boolean}  [locked]
@@ -243,7 +243,7 @@ function validateKeyframe(kf, path, errors) {
 function validateLayer(l, path, errors) {
   if (!checkType(l, ['object'], errors, path)) return;
   if (!l.id || typeof l.id !== 'string') pushErr(errors, path + '.id', 'required string');
-  checkEnum(l.type, ['text','logo','color'], errors, path + '.type');
+  checkEnum(l.type, ['text','logo','color','image'], errors, path + '.type');
   if (!l.timing || typeof l.timing.in !== 'number' || typeof l.timing.out !== 'number') {
     pushErr(errors, path + '.timing', 'must have numeric in + out');
   }
@@ -389,7 +389,7 @@ function serialize(state, opts = {}) {
   }
   // Image clips referenced by logo layers
   for (const l of (state.layers || [])) {
-    if (l.type === 'logo' && l.src) {
+    if ((l.type === 'logo' || l.type === 'image') && l.src) {
       if (!clips.some(c => c.path === l.src)) {
         clips.push({ id: newClipId(), path: l.src, kind: 'image' });
       }
@@ -509,7 +509,7 @@ function layerToDoc(l) {
       color:       l.color      || '#ffffff',
       align:       l.align      || 'center',
     };
-  } else if (l.type === 'logo') {
+  } else if (l.type === 'logo' || l.type === 'image') {
     out.content = { src: l.src || null };
   } else if (l.type === 'color') {
     out.content = { color: l.color || '#000000' };
@@ -613,7 +613,7 @@ function docToLayer(L, projectId) {
     out.fontWeight = L.content?.font_weight  ?? 700;
     out.color      = L.content?.color        ?? '#ffffff';
     out.align      = L.content?.align        ?? 'center';
-  } else if (L.type === 'logo') {
+  } else if (L.type === 'logo' || L.type === 'image') {
     // Rebuild the runtime image so the canvas can draw it.
     // The doc stores only the filename; the URL is derived from the project's
     // file-serving route (/projects/<pid>/files/<filename>).
