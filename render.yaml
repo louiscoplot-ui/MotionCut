@@ -1,0 +1,36 @@
+# Render Blueprint for MotionCut.
+# Apply once at https://dashboard.render.com/blueprints/new — Render reads
+# this file from the repo root and creates the service automatically.
+# Subsequent pushes to the watched branch trigger auto-redeploys.
+
+services:
+  - type: web
+    name: motioncut
+    runtime: docker
+    # Branch tracked for auto-deploy. Change this if you ever rename it.
+    branch: claude/motioncut-video-editor-nZFMP
+    plan: starter            # cheapest tier that supports a persistent disk
+    autoDeploy: true         # redeploy on every push to the branch above
+    healthCheckPath: /api/health
+    dockerfilePath: ./Dockerfile
+
+    envVars:
+      # Production toggles. MOTIONCUT_PROD turns off Flask debug; the
+      # Dockerfile already sets it but we re-declare here for clarity in the
+      # Render dashboard.
+      - key: MOTIONCUT_PROD
+        value: "1"
+      - key: MOTIONCUT_NO_AUTOPULL
+        value: "1"
+      # Point the upload + export roots at the persistent disk mount below
+      # so user files survive container restarts and redeploys.
+      - key: MOTIONCUT_UPLOAD_DIR
+        value: /var/data/uploads
+      - key: MOTIONCUT_EXPORT_DIR
+        value: /var/data/exports
+      # PORT is auto-injected by Render — Dockerfile's CMD reads it.
+
+    disk:
+      name: motioncut-data
+      mountPath: /var/data
+      sizeGB: 5             # bump in the dashboard if uploads grow past this

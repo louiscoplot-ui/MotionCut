@@ -34,8 +34,11 @@ from flask_cors import CORS
 # Paths & config
 # ----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-EXPORT_DIR = BASE_DIR / "exports"
+# Storage roots are env-overridable so a hosted deploy (Render, Fly, etc.)
+# can mount a persistent disk at e.g. /var/data and point both at it. Local
+# dev keeps the legacy ./uploads, ./exports paths.
+UPLOAD_DIR = Path(os.environ.get("MOTIONCUT_UPLOAD_DIR") or (BASE_DIR / "uploads"))
+EXPORT_DIR = Path(os.environ.get("MOTIONCUT_EXPORT_DIR") or (BASE_DIR / "exports"))
 TMP_DIR    = UPLOAD_DIR / ".chunks"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1952,22 +1955,34 @@ def too_large(_e):
 # ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
-if __name__ == "__main__":
+# One-shot startup work shared by both `python app.py` and any WSGI server
+# (gunicorn). Runs at import time so Render / Fly / etc. don't need a custom
+# entrypoint shim — they just point at app:app.
+def _bootstrap():
     print("=" * 60)
-    print(" MotionCut - local video editor")
+    print(" MotionCut - video editor")
     print(f" FFmpeg: {FFMPEG}  available={ffmpeg_available()}")
     print(f" Uploads: {UPLOAD_DIR}")
     print(f" Exports: {EXPORT_DIR}")
-    print(" Open http://localhost:5000")
     print("=" * 60)
     # Migrate any legacy loose files to uploads/default/
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
-        migrate_legacy_uploads()
-        project_dir("default")  # ensure exists
-    # Auto-pull from origin every 15s so the browser refresh always shows the
-    # latest commit. Only run in the main process (not in the Werkzeug reloader child).
+        try: migrate_legacy_uploads()
+        except Exception as e: print(f"[migrate] {e}")
+        project_dir("default")
+    # Auto-pull is a Codespaces-only convenience — useless on a hosted
+    # deploy (Render redeploys on each push, no .git to pull anyway).
+    # Auto-disable when MOTIONCUT_NO_AUTOPULL is set OR there's no .git.
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
         start_auto_pull()
-    # debug=True enables auto-reload on app.py changes (hot reload).
-    # For Codespaces, bind to 0.0.0.0 so the forwarded port works.
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True, use_reloader=True)
+
+
+_bootstrap()
+
+
+if __name__ == "__main__":
+    # Local dev: Werkzeug reloader, debug on, configurable port.
+    port = int(os.environ.get("PORT", "5000"))
+    debug = os.environ.get("MOTIONCUT_PROD", "").lower() not in ("1", "true", "yes")
+    print(f" Open http://localhost:{port}  (debug={debug})")
+    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True, use_reloader=debug)

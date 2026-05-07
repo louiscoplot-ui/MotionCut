@@ -1,0 +1,27 @@
+# Don't ship local artefacts to the build context. .git is intentionally
+# included so /api/version's `git rev-parse` keeps working in the container
+# (this is what drives the cache-bust query string on /static/*).
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.local
+.DS_Store
+
+# Local dev state — never bake user uploads into the image, the Render
+# disk mount provides the persistent location.
+uploads/
+exports/
+*.log
+/tmp/
+
+# Editor / IDE noise
+.vscode/
+.idea/
+*.swp
+
+# Test fixtures
+test*.mp4
+/tmp/test*
