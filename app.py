@@ -267,9 +267,21 @@ def add_no_cache_headers(resp):
     return resp
 
 
+def _git_short_sha():
+    """Best-effort short git SHA. Used as a cache-bust suffix on static assets
+    so the browser can't serve stale JS/CSS after a redeploy."""
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR), capture_output=True, text=True, timeout=5
+        ).stdout.strip() or "dev"
+    except Exception:
+        return "dev"
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", build_version=_git_short_sha())
 
 
 @app.route("/api/version")

@@ -592,10 +592,13 @@
 <!-- GSAP motion engine -->
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 
-<script src="{{ url_for('static', filename='js/project-state.js') }}"></script>
-<script src="{{ url_for('static', filename='js/motion.js') }}"></script>
-<script src="{{ url_for('static', filename='js/timeline.js') }}"></script>
-<script src="{{ url_for('static', filename='js/editor.js') }}"></script>
+<!-- ?v=<git-sha> defeats stale browser caches when the user pulls a new
+     build. The Flask side already sends Cache-Control:no-store on /static,
+     but a query-string bust is belt-and-braces for misconfigured proxies. -->
+<script src="{{ url_for('static', filename='js/project-state.js') }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/motion.js')         }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/timeline.js')       }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/editor.js')         }}?v={{ build_version }}"></script>
 <script>if (window.lucide) lucide.createIcons();</script>
 </body>
 </html>

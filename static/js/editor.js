@@ -3224,10 +3224,47 @@ function restoreFromDocument(doc) {
   try { window.MC?.timeline?.render?.(); } catch {}
   draw();
   toast('Project restored', { gold: true });
+  // One-time heal for projects saved before the photo-routing fix: any
+  // layer typed 'logo' that points at a photo file but ISN'T flagged as a
+  // brand logo was almost certainly a misrouted photo upload (showed up
+  // as "Logo 7/8/9" in the Layers panel). Promote it to type:'image' so
+  // it renders as a real image layer with a sensible name.
+  migrateLegacyLogoLayers();
   // Async garbage-collect any segments / image-layers whose source file is
   // no longer on disk. Fires after the initial paint so the user sees the
   // restored state first, then ghosts vanish silently a moment later.
   purgeGhostMedia().catch(err => console.warn('[restore] purge failed', err));
+}
+
+/**
+ * Heal old project docs where photos got persisted as small corner logos.
+ * We only touch layers that:
+ *   - have type 'logo'
+ *   - have a filename src ending in a photo extension
+ *   - are NOT the brand-kit logo (no _brandLogo flag)
+ * Each becomes type 'image' with the filename as its display name.
+ * No-op when there's nothing to migrate.
+ */
+function migrateLegacyLogoLayers() {
+  let migrated = 0;
+  for (const l of (state.layers || [])) {
+    if (l.type !== 'logo' || !l.src || l._brandLogo) continue;
+    const ext = (l.src.split('.').pop() || '').toLowerCase();
+    if (!['jpg','jpeg','png','webp','gif','bmp'].includes(ext)) continue;
+    l.type = 'image';
+    // Replace the auto-generated "Logo N" name with the actual filename
+    // (stripped of the upload-id prefix) so the user can identify it.
+    if (!l.name || /^Logo\s+\d+$/i.test(l.name)) {
+      l.name = l.src.replace(/^[a-f0-9]{6,16}_/, '');
+    }
+    migrated++;
+  }
+  if (migrated > 0) {
+    renderLayersPanel();
+    draw();
+    snapshot();
+    toast(`Migrated ${migrated} photo layer${migrated > 1 ? 's' : ''}`);
+  }
 }
 
 /**
@@ -3610,7 +3647,7 @@ async function refreshLibrary() {
     });
   });
   lib.querySelectorAll('.lib-item').forEach(it => {
-    it.addEventListener('click', (e) => {
+    it.addEventListener('click', async (e) => {
       if (e.target.closest('.lib-del'))   return;     // X click handled separately
       if (e.target.closest('.lib-check')) return;     // checkbox handles its own
       if (e.target.closest('.lib-grip'))  return;     // grip is for drag only
@@ -3620,9 +3657,26 @@ async function refreshLibrary() {
         kind: it.dataset.kind,
         duration: parseFloat(it.dataset.duration) || 0,
       };
-      // Audio shortcuts straight through; video/image show a small chooser
-      // so users have a fallback when drag-to-track doesn't work for them.
+      // Single-click semantics by kind:
+      //   video -> direct add to the timeline (most common flow; the user
+      //            shouldn't have to click again to confirm).
+      //   image -> show the chooser, because there's a real ambiguity
+      //            between "full-canvas image" and "corner overlay/logo".
+      //   audio -> set as music track (no chooser needed).
+      if (meta.kind === 'video') {
+        let dur = meta.duration > 0 ? meta.duration : await probeAndPatch(meta.filename);
+        if (!dur || dur <= 0) dur = 30;
+        appendSegment({
+          filename: meta.filename, url: meta.url, kind: 'video',
+          sourceIn: 0, sourceOut: dur, _duration: dur,
+        });
+        const display = (meta.filename || '').replace(/^[a-f0-9]{6,16}_/, '');
+        toast(`${display} added to timeline`);
+        try { await window.MC?.project?.save?.(state); } catch {}
+        return;
+      }
       if (meta.kind === 'audio') { applyMusic(meta); return; }
+      // Image: keep the popover so the user picks full-canvas vs overlay.
       showLibraryItemMenu(it, meta);
     });
   });
@@ -4149,6 +4203,11 @@ function onKey(e) {
 //  Init
 // ============================================================
 function init() {
+  // Quick cache check: this banner appears in DevTools every page load.
+  // If the user reports "the new UI isn't showing", first sanity-check
+  // they see a fresh banner — if it's missing or stale, browser cache
+  // is the cause and a hard reload (Cmd+Shift+R) fixes it.
+  console.log('%c[MC] editor build', 'color:#f0c040;font-weight:bold', '— multi-clip + premium media panel');
   // Bind DOM refs
   video        = $('video');
   canvas       = $('canvas');
