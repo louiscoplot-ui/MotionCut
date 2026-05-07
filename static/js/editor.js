@@ -26,10 +26,16 @@ const FONTS = [
 const state = {
   project: 'default',
   projects: [],
-  video: null,
+  video: null,                  // mirrors the segment currently under the playhead
   audio: null,
   aspect: '16:9',
   layers: [],
+  // Multi-clip timeline. Each segment is one cut on the video track.
+  // state.video stays in sync with whichever segment is "active" at the
+  // current playhead so the existing canvas/draw code keeps working.
+  segments: [],                 // see makeSegment() below for shape
+  activeSegmentId: null,
+  selectedSegmentId: null,
   selectedId: null,
   selectedIds: new Set(),       // multi-select set; selectedId remains the "primary"
   template: 'custom',
@@ -250,6 +256,142 @@ function undo() { if (history.idx > 0) { history.idx--; restore(history.stack[hi
 function redo() { if (history.idx < history.stack.length - 1) { history.idx++; restore(history.stack[history.idx]); } }
 
 // ============================================================
+//  Segments (multi-clip video track)
+// ============================================================
+// A segment = one ordered cut on the video track. Source clips are referenced
+// by filename (matching files in the project upload folder). The runtime
+// shape carries timeline positions (timelineIn/timelineOut) which are
+// derived from sourceIn/sourceOut + accumulated transitions; we keep them
+// on the object so the timeline render and playback can read in O(1).
+function makeSegment(opts={}) {
+  const sIn  = +opts.sourceIn  || 0;
+  const sOut = +opts.sourceOut || (opts.duration ? sIn + +opts.duration : sIn + 5);
+  return {
+    id:          opts.id          || ('seg_' + uid()),
+    filename:    opts.filename    || null,
+    url:         opts.url         || null,
+    kind:        opts.kind        || 'video',  // 'video' | 'image'
+    sourceIn:    sIn,
+    sourceOut:   Math.max(sIn + 0.05, sOut),
+    timelineIn:  +opts.timelineIn  || 0,
+    timelineOut: +opts.timelineOut || (sOut - sIn),
+    transition:  opts.transition  || { type: 'cut', duration: 0 },
+    _duration:   opts._duration   || null,     // probed source duration when known
+  };
+}
+
+/** Recompute timelineIn/timelineOut for every segment based on sourceIn/sourceOut + transitions.
+ *  Mutates segments in place. transition lives on a segment and applies BETWEEN it and the next. */
+function reflowSegments(segments) {
+  let cursor = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    const dur = Math.max(0.05, s.sourceOut - s.sourceIn);
+    s.timelineIn  = cursor;
+    s.timelineOut = cursor + dur;
+    cursor = s.timelineOut;
+    // Crossfade/fadeblack overlap into the next segment by `transition.duration`.
+    const t = s.transition || { type: 'cut', duration: 0 };
+    const overlap = (t.type === 'crossfade' || t.type === 'xfade' || t.type === 'fade'
+                     || t.type === 'fade_to_black' || t.type === 'fadeblack' || t.type === 'dip-to-black')
+                     ? Math.max(0, +t.duration || 0) : 0;
+    cursor -= overlap;
+  }
+  return segments;
+}
+
+/** Total length of the timeline in seconds (after reflow). */
+function totalSegmentsDuration() {
+  if (!state.segments.length) return 0;
+  return state.segments[state.segments.length - 1].timelineOut;
+}
+
+/** Find the segment that should be playing at timeline-time `t`. Returns the
+ *  segment + the source-time inside it (clamped to its range). */
+function segmentAt(t) {
+  if (!state.segments.length) return { seg: null, st: 0 };
+  for (let i = 0; i < state.segments.length; i++) {
+    const s = state.segments[i];
+    if (t < s.timelineOut - 1e-3 || i === state.segments.length - 1) {
+      const st = clamp(s.sourceIn + (t - s.timelineIn), s.sourceIn, s.sourceOut);
+      return { seg: s, st };
+    }
+  }
+  const last = state.segments[state.segments.length - 1];
+  return { seg: last, st: last.sourceOut };
+}
+
+/** Build a project-folder URL for a source filename. Falls back to legacy /uploads/. */
+function segmentUrl(filename) {
+  if (!filename) return null;
+  return '/projects/' + encodeURIComponent(state.project || 'default')
+       + '/files/'   + encodeURIComponent(filename);
+}
+
+/** Make `state.video` reflect the segment under the playhead so the existing
+ *  draw / inspector / library / project-state code keeps working unchanged. */
+function activateSegment(seg, sourceTime) {
+  if (!seg) {
+    state.activeSegmentId = null;
+    return;
+  }
+  state.activeSegmentId = seg.id;
+  const wantUrl = seg.url || segmentUrl(seg.filename);
+  const filenameChanged = !state.video || state.video.filename !== seg.filename;
+  if (filenameChanged) {
+    state.video = {
+      filename: seg.filename,
+      url:      wantUrl,
+      kind:     seg.kind || 'video',
+      duration: seg._duration || 0,
+    };
+    if (video) {
+      video.src = wantUrl;
+      try { video.load(); } catch {}
+      video.onloadedmetadata = () => {
+        seg._duration = video.duration || seg._duration || (seg.sourceOut - seg.sourceIn);
+        if (sourceTime != null) { try { video.currentTime = sourceTime; } catch {} }
+        try { window.MC?.timeline?.render?.(); } catch {}
+        draw();
+      };
+    }
+    $('dropzone-video')?.classList.add('has-file');
+    if ($('dropzone-video')) $('dropzone-video').querySelector('.dz-title').textContent = (seg.filename || 'video').slice(0,18);
+  } else if (sourceTime != null && video) {
+    try { video.currentTime = sourceTime; } catch {}
+  }
+}
+
+/** Append a segment to the end of the timeline and activate it if it's the first. */
+function appendSegment(opts) {
+  const seg = makeSegment(opts);
+  state.segments.push(seg);
+  reflowSegments(state.segments);
+  if (state.segments.length === 1) activateSegment(seg, seg.sourceIn);
+  state.selectedSegmentId = seg.id;
+  try { window.MC?.timeline?.render?.(); } catch {}
+  snapshot();
+  return seg;
+}
+
+/** Remove a segment by id; reflow timeline; pick a sensible new active seg. */
+function removeSegment(id) {
+  const i = state.segments.findIndex(s => s.id === id);
+  if (i < 0) return;
+  state.segments.splice(i, 1);
+  reflowSegments(state.segments);
+  if (state.activeSegmentId === id) {
+    const next = state.segments[Math.min(i, state.segments.length - 1)];
+    if (next) activateSegment(next, next.sourceIn);
+    else { state.video = null; state.activeSegmentId = null; if (video) { video.removeAttribute('src'); video.load(); } }
+  }
+  if (state.selectedSegmentId === id) state.selectedSegmentId = state.segments[0]?.id || null;
+  try { window.MC?.timeline?.render?.(); } catch {}
+  snapshot();
+  draw();
+}
+
+// ============================================================
 //  Upload (with chunked fallback)
 // ============================================================
 const CHUNK_THRESHOLD = 3 * 1024 * 1024;
@@ -321,9 +463,16 @@ async function handleFile(file, kindHint) {
   // the local URL playing in the <video> element — no re-buffer.
   let localUrl = null;
   let localLayer = null;
+  let localSegment = null;
   if (kind === 'video') {
     localUrl = URL.createObjectURL(file);
-    applyVideo({ filename: file.name, url: localUrl, kind: 'video', duration: 0, _local: true });
+    // Append a segment for this clip; first one auto-activates and shows in
+    // the player. Subsequent uploads stack on the timeline.
+    localSegment = appendSegment({
+      filename: file.name, url: localUrl, kind: 'video',
+      sourceIn: 0, sourceOut: 9999,   // refined when the upload returns probed duration
+    });
+    localSegment._local = true;
   } else if (kind === 'logo') {
     // Explicit logo intent: small corner overlay, original sizing rules.
     localUrl = URL.createObjectURL(file);
@@ -379,14 +528,26 @@ async function handleFile(file, kindHint) {
 
     // Swap optimistic refs to server-backed names so exports resolve correctly.
     if (kind === 'video') {
-      if (state.video && state.video._local && state.video.filename === file.name) {
-        state.video.filename = meta.filename;
-        state.video._local = false;
-        state.video.duration = meta.duration || video.duration;
+      // Promote the optimistic segment to its server-backed filename and
+      // refine its sourceOut once we know the real duration. Mirror the
+      // change on state.video if this is the segment currently playing.
+      if (localSegment) {
+        localSegment.filename = meta.filename;
+        localSegment.url      = meta.url || segmentUrl(meta.filename);
+        localSegment._local   = false;
+        const probedDur = +meta.duration || video.duration || (localSegment.sourceOut - localSegment.sourceIn);
+        localSegment._duration = probedDur;
+        if (localSegment.sourceOut === 9999) localSegment.sourceOut = probedDur;
+        reflowSegments(state.segments);
       }
-      toast(wasVideo ? `Now editing ${file.name}` : `Loaded ${file.name}`, { gold: true });
-      // Re-snapshot now that the server filename is set — without this the
-      // autosave debounce could fire with the OLD local filename in scope.
+      if (state.video && state.video.filename === file.name) {
+        state.video.filename = meta.filename;
+        state.video.url      = meta.url || segmentUrl(meta.filename);
+        state.video.duration = meta.duration || video.duration;
+        state.video._local   = false;
+      }
+      toast(wasVideo ? `Added ${file.name}` : `Loaded ${file.name}`, { gold: true });
+      try { window.MC?.timeline?.render?.(); } catch {}
       snapshot();
     } else if (kind === 'logo' || kind === 'image') {
       // Match by the layer reference we created above so we don't accidentally
@@ -406,16 +567,15 @@ async function handleFile(file, kindHint) {
 }
 
 function applyVideo(meta) {
-  state.video = meta;
-  video.src = meta.url; video.load();
-  video.onloadedmetadata = () => {
-    state.layers.forEach(l => { if (l.end > 9000) l.end = video.duration; });
-    if (stageEmpty) stageEmpty.classList.add('hidden');
-    draw();
-    try { window.MC?.timeline?.render?.(); } catch {}
-  };
-  $('dropzone-video').classList.add('has-file');
-  $('dropzone-video').querySelector('.dz-title').textContent = meta.filename.slice(0,18);
+  // Library re-add path (existing UX): clicking a video file in the library
+  // appends a new segment to the timeline rather than replacing what's there.
+  // Keeps multi-clip workflows additive and matches NLE expectations.
+  appendSegment({
+    filename: meta.filename, url: meta.url, kind: 'video',
+    sourceIn: 0, sourceOut: meta.duration && meta.duration > 0 ? meta.duration : 9999,
+    _duration: meta.duration || 0,
+  });
+  if (stageEmpty) stageEmpty.classList.add('hidden');
 }
 function applyImageFromLibrary(meta) {
   // Library re-add path: file already lives on the server, so no upload — just
@@ -2144,16 +2304,23 @@ async function applyMagicPlan() {
   state.letterbox   = style.letterbox;
   syncStyleControls();
 
-  // 2. Apply the FIRST segment to the active video (singular slot for now).
-  //    The full multi-clip plan is parked on state.editPlan for the
-  //    upcoming multi-clip timeline work.
-  if (plan.segments?.[0]) {
-    const seg = plan.segments[0];
-    state.inMark  = seg.sourceIn;
-    state.outMark = seg.sourceOut;
-  } else {
-    state.inMark = state.outMark = null;
+  // 2. Convert the EditPlan's segments into runtime state.segments so the
+  //    timeline shows every clip as its own block. The first segment also
+  //    gets activated as the "playing" source. inMark/outMark are cleared —
+  //    multi-clip exports use the segments array, not the legacy marks.
+  if (Array.isArray(plan.segments) && plan.segments.length) {
+    state.segments = plan.segments.map(s => makeSegment({
+      filename:  s.clipFilename,
+      url:       segmentUrl(s.clipFilename),
+      kind:      'video',
+      sourceIn:  s.sourceIn,
+      sourceOut: s.sourceOut,
+      transition: s.transition || { type: 'cut', duration: 0 },
+    }));
+    reflowSegments(state.segments);
+    activateSegment(state.segments[0], state.segments[0].sourceIn);
   }
+  state.inMark = state.outMark = null;
   state.editPlan = plan;
 
   // 3. Replace overlay layers with title cards anchored to plan.overlaySlots
@@ -2782,26 +2949,36 @@ function buildExportPayload(aspectOverride) {
     musicMode: state.music.mode,
     layers: state.layers.map(l => ({ ...l, img: undefined, canvasW, canvasH })),
   };
-  // Multi-clip mode: when a Magic Edit plan is active, ship its segments to
-  // the backend so the export concatenates real clips instead of trimming
-  // the single state.video. Legacy single-clip exports skip this entirely.
-  const segs = state.editPlan?.segments;
-  if (Array.isArray(segs) && segs.length > 0) {
-    payload.segments = segs.map(s => ({
-      clipFilename: s.clipFilename,
-      sourceIn:  Number(s.sourceIn)  || 0,
-      sourceOut: Number(s.sourceOut) || 0,
-      transition: s.transition || { type: 'cut', duration: 0 },
-    }));
-    // If the user hasn't picked their own music, fall back to the plan's pick.
-    if (!payload.audio && state.editPlan?.audio?.musicFilename) {
-      payload.audio = state.editPlan.audio.musicFilename;
+  // Multi-clip mode: state.segments is the source of truth (Magic Edit, manual
+  // drags from the library, multi-file drops all populate it). Fall back to
+  // state.editPlan?.segments only if state.segments is empty for some reason —
+  // belt-and-braces for very old projects loaded before the segments rework.
+  const runtimeSegs = (state.segments && state.segments.length)
+    ? state.segments.map(s => ({
+        clipFilename: s.filename,
+        sourceIn:     Number(s.sourceIn)  || 0,
+        sourceOut:    Number(s.sourceOut) || 0,
+        transition:   s.transition || { type: 'cut', duration: 0 },
+      }))
+    : null;
+  const fallbackSegs = state.editPlan?.segments;
+  const segs = runtimeSegs || (Array.isArray(fallbackSegs) && fallbackSegs.length ? fallbackSegs : null);
+  if (segs && segs.length > 0) {
+    // Skip empty/invalid filenames so a half-loaded library doesn't poison
+    // the export. If literally everything got filtered, drop segments and
+    // let the backend fall through to legacy single-clip mode.
+    const filtered = segs.filter(s => s.clipFilename);
+    if (filtered.length) {
+      payload.segments = filtered;
+      if (!payload.audio && state.editPlan?.audio?.musicFilename) {
+        payload.audio = state.editPlan.audio.musicFilename;
+      }
     }
   }
   return payload;
 }
 async function startExport(aspect) {
-  const hasSegments = state.editPlan?.segments?.length > 0;
+  const hasSegments = (state.segments?.length > 0) || (state.editPlan?.segments?.length > 0);
   if (!state.video && !hasSegments) { toast('Upload a video first'); return; }
   const payload = buildExportPayload(aspect);
   try {
@@ -2906,10 +3083,17 @@ function restoreFromDocument(doc) {
     beats:       restored.beats || [],
     brand:       Object.assign({}, state.brand, restored.brand || {}),
     layers:      restored.layers || [],
+    segments:    restored.segments || [],
   });
+  if (state.segments.length) reflowSegments(state.segments);
   // Video: only swap if the doc references one. Don't clobber an active
-  // upload that hasn't yet been saved.
-  if (restored.video?.filename) {
+  // upload that hasn't yet been saved. Multi-clip projects: activate the
+  // first segment so the canvas paints something on load — the segment-swap
+  // loop will keep state.video in sync as the playhead moves.
+  if (state.segments.length) {
+    activateSegment(state.segments[0], state.segments[0].sourceIn);
+    if (stageEmpty) stageEmpty.classList.add('hidden');
+  } else if (restored.video?.filename) {
     const url = '/projects/' + encodeURIComponent(state.project)
               + '/files/'    + encodeURIComponent(restored.video.filename);
     state.video = Object.assign({}, restored.video, { url });
@@ -3090,8 +3274,11 @@ async function refreshLibrary() {
   lib.innerHTML = files.map(f => {
     const icon = f.kind === 'video' ? 'film' : f.kind === 'image' ? 'image' : 'music';
     const display = f.name.replace(/^[a-f0-9]{6,16}_/, '');
+    // Videos and images can be dragged onto the timeline's video track to
+    // append a segment. Audio stays click-only — there's no audio-track drop yet.
+    const draggable = (f.kind === 'video' || f.kind === 'image') ? 'draggable="true"' : '';
     return `
-      <div class="lib-item" data-name="${escapeHTML(f.name)}" data-url="${escapeHTML(f.url)}" data-kind="${f.kind}" title="${escapeHTML(display)}">
+      <div class="lib-item" ${draggable} data-name="${escapeHTML(f.name)}" data-url="${escapeHTML(f.url)}" data-kind="${f.kind}" data-duration="${f.duration || 0}" title="${escapeHTML(display)}">
         <i data-lucide="${icon}"></i>
         <span class="lib-name">${escapeHTML(display)}</span>
         <span class="lib-kind">${escapeHTML(t('library.' + f.kind))}</span>
@@ -3099,6 +3286,18 @@ async function refreshLibrary() {
       </div>`;
   }).join('');
   refreshIcons();
+  lib.querySelectorAll('.lib-item[draggable="true"]').forEach(it => {
+    it.addEventListener('dragstart', (e) => {
+      const payload = {
+        filename: it.dataset.name,
+        url:      it.dataset.url,
+        kind:     it.dataset.kind,
+        duration: parseFloat(it.dataset.duration) || 0,
+      };
+      e.dataTransfer.setData('application/x-motioncut-lib', JSON.stringify(payload));
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+  });
   lib.querySelectorAll('.lib-item').forEach(it => {
     it.addEventListener('click', (e) => {
       if (e.target.closest('.lib-del')) return;     // X click handled separately
@@ -3149,6 +3348,16 @@ async function refreshLibrary() {
         const before = state.layers.length;
         state.layers = state.layers.filter(l => !((l.type === 'logo' || l.type === 'image') && l.src === name));
         if (state.layers.length !== before) { renderLayersPanel(); draw(); }
+        // Drop any segments that referenced the now-deleted file. reflow + reactivate.
+        const segsBefore = state.segments.length;
+        state.segments = state.segments.filter(s => s.filename !== name);
+        if (state.segments.length !== segsBefore) {
+          reflowSegments(state.segments);
+          if (state.segments[0]) activateSegment(state.segments[0], state.segments[0].sourceIn);
+          else { state.video = null; if (video) { video.removeAttribute('src'); video.load(); } }
+          try { window.MC?.timeline?.render?.(); } catch {}
+          draw();
+        }
         toast(tt('toast.file_deleted'));
         refreshLibrary();
       } catch (err) {
@@ -3438,6 +3647,9 @@ function init() {
     setInMark, setOutMark, clearMarks,
     selectAll, deleteSelected, duplicateSelected,
     detectBeats,
+    // Segments / multi-clip surface — exposed so timeline.js (and any future
+    // consumer) can mutate the timeline without depending on internal globals.
+    appendSegment, removeSegment, segmentAt, activateSegment, reflowSegments,
   };
 
   // Health check

@@ -368,16 +368,29 @@ function serialize(state, opts = {}) {
 
   /** @type {ClipMeta[]} */
   const clips = [];
-  if (state.video) {
-    clips.push({
-      id:           state.video._docId || ('clip_' + (state.video.filename || 'video').replace(/[^A-Za-z0-9]/g, '').slice(0, 12) || 'unknown'),
-      path:         state.video.filename,
-      kind:         'video',
-      duration:     state.video.duration || 0,
-      aspect_ratio: state.aspect || '16:9',
-      analyzed:     !!state.video.analysis,
-      analysis:     state.video.analysis || undefined,
-    });
+  // Helper: register a video/image source clip once and return its id. The
+  // schema requires a clip_id on every segment, so we deterministically derive
+  // an id from the filename to keep round-trips stable.
+  function registerClip(filename, kind, duration) {
+    if (!filename) return null;
+    let c = clips.find(x => x.path === filename);
+    if (c) return c.id;
+    const id = 'clip_' + filename.replace(/[^A-Za-z0-9]/g, '').slice(0, 16) || newClipId();
+    c = { id, path: filename, kind: kind || 'video', duration: duration || 0 };
+    if (kind === 'video') c.aspect_ratio = state.aspect || '16:9';
+    clips.push(c);
+    return id;
+  }
+
+  // Skip optimistic in-flight segments (still on a blob: URL). They'll get
+  // picked up by the next snapshot once the upload promotes them.
+  const liveSegments = (state.segments || []).filter(s => s.filename && !s._local);
+  for (const s of liveSegments) {
+    registerClip(s.filename, s.kind || 'video', s._duration || 0);
+  }
+  // Legacy fallback: pre-segments projects only had state.video.
+  if (!liveSegments.length && state.video && !state.video._local) {
+    registerClip(state.video.filename, 'video', state.video.duration || 0);
   }
   if (state.audio) {
     clips.push({
@@ -387,7 +400,7 @@ function serialize(state, opts = {}) {
       duration: state.audio.duration || 0,
     });
   }
-  // Image clips referenced by logo layers
+  // Image clips referenced by logo or image overlay layers.
   for (const l of (state.layers || [])) {
     if ((l.type === 'logo' || l.type === 'image') && l.src) {
       if (!clips.some(c => c.path === l.src)) {
@@ -398,15 +411,37 @@ function serialize(state, opts = {}) {
 
   /** @type {Segment[]} */
   const segments = [];
-  const videoClip = clips.find(c => c.kind === 'video');
-  if (videoClip) {
-    segments.push({
-      id:         newSegId(),
-      clip_id:    videoClip.id,
-      source_in:  state.inMark  ?? 0,
-      source_out: state.outMark ?? (videoClip.duration || 0),
-      transition: { type: 'cut', duration: 0 },
-    });
+  if (liveSegments.length) {
+    for (const s of liveSegments) {
+      const cid = registerClip(s.filename, s.kind || 'video', s._duration || 0);
+      if (!cid) continue;
+      // Map runtime transition types onto the schema's enum. Anything else
+      // collapses to a hard cut so the saved doc still validates.
+      const t = s.transition || { type: 'cut', duration: 0 };
+      let ttype = (t.type || 'cut').toLowerCase();
+      if (ttype === 'crossfade') ttype = 'xfade';
+      if (ttype === 'fade_to_black' || ttype === 'fadeblack') ttype = 'dip-to-black';
+      if (!['cut','xfade','fade','wipe','dip-to-black'].includes(ttype)) ttype = 'cut';
+      segments.push({
+        id:         s.id && /^seg_[A-Za-z0-9]+$/.test(s.id) ? s.id : newSegId(),
+        clip_id:    cid,
+        source_in:  +s.sourceIn  || 0,
+        source_out: Math.max((+s.sourceIn || 0) + 0.05, +s.sourceOut || 0),
+        transition: { type: ttype, duration: +t.duration || 0 },
+      });
+    }
+  } else {
+    // Legacy single-clip projects: synthesize one segment from state.video + marks.
+    const videoClip = clips.find(c => c.kind === 'video');
+    if (videoClip) {
+      segments.push({
+        id:         newSegId(),
+        clip_id:    videoClip.id,
+        source_in:  state.inMark  ?? 0,
+        source_out: state.outMark ?? (videoClip.duration || 0),
+        transition: { type: 'cut', duration: 0 },
+      });
+    }
   }
 
   /** @type {Layer[]} */
@@ -569,7 +604,55 @@ function deserialize(doc, projectId) {
       logoFile:   doc.brand?.logo_path   || null,
       logoUrl:    null,
     },
+    // Reconstruct runtime segments from the doc's segments + clips. The
+    // multi-clip timeline reads state.segments; state.video tracks whichever
+    // segment is currently active so the existing draw/inspector path works.
+    segments: (() => {
+      const docSegs = doc.segments || [];
+      if (!docSegs.length) return [];
+      const clipById = new Map((doc.clips || []).map(c => [c.id, c]));
+      let cursor = 0;
+      const out = [];
+      for (const s of docSegs) {
+        const clip = clipById.get(s.clip_id);
+        if (!clip) continue;
+        // Map schema transition names back to runtime names.
+        const t = s.transition || { type: 'cut', duration: 0 };
+        let rt = (t.type || 'cut').toLowerCase();
+        if (rt === 'xfade') rt = 'crossfade';
+        if (rt === 'dip-to-black') rt = 'fade_to_black';
+        const sIn  = +s.source_in  || 0;
+        const sOut = Math.max(sIn + 0.05, +s.source_out || 0);
+        const dur  = sOut - sIn;
+        const seg = {
+          id: s.id, filename: clip.path, kind: clip.kind || 'video',
+          url: pid ? ('/projects/' + encodeURIComponent(pid) + '/files/' + encodeURIComponent(clip.path)) : null,
+          sourceIn: sIn, sourceOut: sOut,
+          timelineIn: cursor, timelineOut: cursor + dur,
+          transition: { type: rt, duration: +t.duration || 0 },
+          _duration: clip.duration || dur,
+        };
+        out.push(seg);
+        cursor = seg.timelineOut;
+        const overlap = (rt === 'crossfade' || rt === 'xfade' || rt === 'fade'
+                       || rt === 'fade_to_black' || rt === 'dip-to-black')
+          ? Math.max(0, +t.duration || 0) : 0;
+        cursor -= overlap;
+      }
+      return out;
+    })(),
     video: (() => {
+      // Pick the first video segment as the initially-active source so the
+      // canvas has something to render on load.
+      const seg = (doc.segments || []).find(s => {
+        const clip = (doc.clips || []).find(c => c.id === s.clip_id);
+        return clip && clip.kind === 'video';
+      });
+      if (seg) {
+        const clip = (doc.clips || []).find(c => c.id === seg.clip_id);
+        return clip ? { filename: clip.path, duration: clip.duration, _docId: clip.id } : null;
+      }
+      // Fallback for legacy docs that didn't write segments.
       const c = (doc.clips || []).find(x => x.kind === 'video');
       return c ? { filename: c.path, duration: c.duration, _docId: c.id } : null;
     })(),

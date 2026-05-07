@@ -24,6 +24,10 @@ const fmtT = (s) => {
 const refreshIcons = () => { try { window.lucide && window.lucide.createIcons(); } catch {} };
 
 function getDuration() {
+  // Multi-clip: timeline length = sum of segment durations minus crossfades.
+  const segs = api?.state?.segments;
+  if (segs && segs.length) return segs[segs.length - 1].timelineOut || 30;
+  // Legacy single-clip fallback for projects loaded before segments existed.
   if (api?.state?.video && api.video?.duration) return api.video.duration;
   return 30;
 }
@@ -149,17 +153,49 @@ function renderRuler(dur, w) {
 function renderVideoTrack(dur) {
   const tr = $('tl-track-video');
   if (!tr) return;
-  if (!api.state.video) {
-    tr.innerHTML = `<div class="tl-empty-track">Drop a video to begin</div>`;
+  const segs = api.state.segments || [];
+  // Drop-target hint sits as a sibling so it can light up while drag-over.
+  if (!segs.length) {
+    if (!api.state.video) {
+      tr.innerHTML = `<div class="tl-empty-track">Drop a video here, or drag from the library</div>`;
+      return;
+    }
+    // Legacy projects: synthesize a virtual single segment from state.video so
+    // the visual is consistent. Don't mutate state — just render.
+    const w = dur * pps;
+    tr.innerHTML = `
+      <div class="tl-clip clip-video" data-kind="video" style="left:0px;width:${w}px">
+        <i data-lucide="film"></i>
+        <span class="tl-clip-name">${escapeHTML(displayVideoName())}</span>
+        <span class="tl-clip-dur mono">${fmtT(dur)}</span>
+      </div>`;
+    refreshIcons();
     return;
   }
-  const w = dur * pps;
-  tr.innerHTML = `
-    <div class="tl-clip clip-video" data-kind="video" style="left:0px;width:${w}px">
-      <i data-lucide="film"></i>
-      <span class="tl-clip-name">${escapeHTML(displayVideoName())}</span>
-      <span class="tl-clip-dur mono">${fmtT(dur)}</span>
-    </div>`;
+  // Multi-clip render. Each segment gets its own block; we add explicit
+  // trim handles on the left/right edges. The thin divider between blocks
+  // (the cut) is just two adjacent borders — no extra DOM needed.
+  tr.innerHTML = segs.map((s, i) => {
+    const left = s.timelineIn * pps;
+    const w    = Math.max(8, (s.timelineOut - s.timelineIn) * pps);
+    const sel  = (s.id === api.state.selectedSegmentId) ? 'is-selected' : '';
+    const act  = (s.id === api.state.activeSegmentId)   ? 'is-active'   : '';
+    const display = (s.filename || 'clip').replace(/^[a-f0-9]{6,16}_/, '').slice(0, 32);
+    const trans = s.transition && s.transition.type !== 'cut' && i < segs.length - 1
+      ? `<span class="tl-clip-trans" title="${escapeHTML(s.transition.type)} ${(+s.transition.duration||0).toFixed(2)}s"></span>` : '';
+    return `
+      <div class="tl-clip clip-segment ${sel} ${act}"
+           data-seg-id="${escapeHTML(s.id)}"
+           data-kind="${escapeHTML(s.kind || 'video')}"
+           style="left:${left}px;width:${w}px">
+        <span class="tl-trim tl-trim-left"  data-trim="left"></span>
+        <i data-lucide="${s.kind === 'image' ? 'image' : 'film'}"></i>
+        <span class="tl-clip-name">${escapeHTML(display)}</span>
+        <span class="tl-clip-dur mono">${fmtT(s.timelineOut - s.timelineIn)}</span>
+        <span class="tl-trim tl-trim-right" data-trim="right"></span>
+        ${trans}
+      </div>`;
+  }).join('');
   refreshIcons();
 }
 function displayVideoName() {
@@ -593,6 +629,173 @@ function splitLayerAt(id, t) {
 }
 
 // ============================================================
+//  Segment interactions (multi-clip video track)
+// ============================================================
+let segDrag = null;       // { id, side: 'left'|'right', startX, startSourceIn, startSourceOut }
+
+function bindSegmentEvents() {
+  const tr = $('tl-track-video');
+  if (!tr) return;
+
+  // Click on a segment body = select. Click on a trim handle starts a drag.
+  tr.addEventListener('mousedown', (e) => {
+    const handle = e.target.closest('.tl-trim');
+    const clip   = e.target.closest('.clip-segment');
+    if (!clip) return;
+    const id = clip.dataset.segId;
+    const seg = api.state.segments.find(s => s.id === id);
+    if (!seg) return;
+
+    if (handle) {
+      e.preventDefault(); e.stopPropagation();
+      segDrag = {
+        id, side: handle.dataset.trim,
+        startX: e.clientX,
+        startSourceIn:  seg.sourceIn,
+        startSourceOut: seg.sourceOut,
+      };
+      window.addEventListener('mousemove', onSegDragMove);
+      window.addEventListener('mouseup',   onSegDragUp);
+      return;
+    }
+    // Plain body click: select + jump playhead to segment start
+    e.stopPropagation();
+    api.state.selectedSegmentId = id;
+    api.video.currentTime = seg.timelineIn + 0.001;
+    render();
+    api.draw();
+  });
+
+  // Right-click context menu: remove segment.
+  tr.addEventListener('contextmenu', (e) => {
+    const clip = e.target.closest('.clip-segment');
+    if (!clip) return;
+    e.preventDefault();
+    const id = clip.dataset.segId;
+    showSegmentMenu(e.clientX, e.clientY, id);
+  });
+
+  // Library drag-to-track. Highlight on dragover, append on drop.
+  tr.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || !hasLibraryPayload(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    tr.classList.add('drag-over');
+  });
+  tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
+  tr.addEventListener('drop', (e) => {
+    tr.classList.remove('drag-over');
+    if (!e.dataTransfer) return;
+    let payload = null;
+    try { payload = JSON.parse(e.dataTransfer.getData('application/x-motioncut-lib') || 'null'); } catch {}
+    if (!payload) return;
+    e.preventDefault();
+    const meta = {
+      filename: payload.filename, url: payload.url,
+      kind: payload.kind, duration: payload.duration || 0,
+    };
+    if (meta.kind === 'video') {
+      api.appendSegment?.({
+        filename: meta.filename, url: meta.url, kind: 'video',
+        sourceIn: 0,
+        sourceOut: meta.duration > 0 ? meta.duration : 9999,
+        _duration: meta.duration || 0,
+      });
+    } else if (meta.kind === 'image') {
+      // Stills get a default 3s on the timeline; user can trim from the right edge.
+      api.appendSegment?.({
+        filename: meta.filename, url: meta.url, kind: 'image',
+        sourceIn: 0, sourceOut: 3, _duration: 3,
+      });
+    }
+    render();
+    api.draw();
+  });
+}
+
+function hasLibraryPayload(dt) {
+  return Array.from(dt.types || []).includes('application/x-motioncut-lib');
+}
+
+function onSegDragMove(e) {
+  if (!segDrag) return;
+  const seg = api.state.segments.find(s => s.id === segDrag.id);
+  if (!seg) return;
+  const dx = (e.clientX - segDrag.startX) / pps;     // px → seconds
+  if (segDrag.side === 'left') {
+    // Adjust source-in (head trim). Block from inverting the segment.
+    seg.sourceIn = Math.max(0, Math.min(segDrag.startSourceIn + dx, seg.sourceOut - 0.1));
+  } else {
+    // Adjust source-out (tail trim). Don't go below 0.1s clip length.
+    const maxOut = (seg._duration && seg._duration > 0) ? seg._duration : 99999;
+    seg.sourceOut = Math.min(maxOut, Math.max(segDrag.startSourceOut + dx, seg.sourceIn + 0.1));
+  }
+  reflowSegmentsInState();
+  render();
+}
+
+function onSegDragUp() {
+  window.removeEventListener('mousemove', onSegDragMove);
+  window.removeEventListener('mouseup',   onSegDragUp);
+  if (segDrag) {
+    api.snapshot();
+    // If the active segment got trimmed past the playhead, snap the playhead inside it.
+    const seg = api.state.segments.find(s => s.id === segDrag.id);
+    if (seg && api.video) {
+      const t = api.video.currentTime || 0;
+      if (t < seg.timelineIn) api.video.currentTime = seg.timelineIn + 0.001;
+      else if (t > seg.timelineOut) api.video.currentTime = seg.timelineOut - 0.001;
+    }
+  }
+  segDrag = null;
+}
+
+function reflowSegmentsInState() {
+  // Segments live in editor.js; reflow is an editor helper exposed via api.
+  if (typeof api.reflowSegments === 'function') {
+    api.reflowSegments(api.state.segments);
+  }
+}
+
+function showSegmentMenu(x, y, segId) {
+  // Lightweight inline context menu — no extra DOM globals needed.
+  const old = document.getElementById('tl-seg-menu');
+  if (old) old.remove();
+  const menu = document.createElement('div');
+  menu.id = 'tl-seg-menu';
+  menu.className = 'tl-seg-menu';
+  menu.style.left = x + 'px'; menu.style.top = y + 'px';
+  menu.innerHTML = `
+    <button data-act="remove"><i data-lucide="trash-2"></i> Remove clip</button>
+    <button data-act="set-in"><i data-lucide="log-in"></i> Set in here</button>
+    <button data-act="set-out"><i data-lucide="log-out"></i> Set out here</button>
+  `;
+  document.body.appendChild(menu);
+  refreshIcons();
+  const close = () => { menu.remove(); document.removeEventListener('click', close); };
+  setTimeout(() => document.addEventListener('click', close), 0);
+  menu.addEventListener('click', (e) => {
+    const act = e.target.closest('button')?.dataset.act;
+    const seg = api.state.segments.find(s => s.id === segId);
+    if (!seg) return;
+    if (act === 'remove') api.removeSegment?.(segId);
+    if (act === 'set-in') {
+      // Set in-point at the current playhead, mapped to source time.
+      const t = api.video?.currentTime || 0;
+      const offset = clamp(t - seg.timelineIn, 0, seg.sourceOut - seg.sourceIn - 0.1);
+      seg.sourceIn = seg.sourceIn + offset;
+      reflowSegmentsInState(); api.snapshot(); render(); api.draw();
+    }
+    if (act === 'set-out') {
+      const t = api.video?.currentTime || 0;
+      const offset = clamp(t - seg.timelineIn, 0.1, seg.sourceOut - seg.sourceIn);
+      seg.sourceOut = seg.sourceIn + offset;
+      reflowSegmentsInState(); api.snapshot(); render(); api.draw();
+    }
+  });
+}
+
+// ============================================================
 //  Live playhead loop (independent — light)
 // ============================================================
 function startPlayheadLoop() {
@@ -600,6 +803,8 @@ function startPlayheadLoop() {
   const tick = () => {
     if (api?.video) {
       const t = api.video.currentTime || 0;
+      // Multi-clip: if the playhead crossed a cut, swap the source video.
+      maybeSwapSegment(t);
       if (Math.abs(t - lastT) > 0.01) {
         updatePlayhead();
         lastT = t;
@@ -610,6 +815,19 @@ function startPlayheadLoop() {
   requestAnimationFrame(tick);
 }
 
+let _lastActiveSegId = null;
+function maybeSwapSegment(t) {
+  const segs = api?.state?.segments;
+  if (!segs || !segs.length || !api.segmentAt) return;
+  const { seg, st } = api.segmentAt(t);
+  if (!seg) return;
+  if (seg.id !== _lastActiveSegId) {
+    _lastActiveSegId = seg.id;
+    api.activateSegment?.(seg, st);
+    render();
+  }
+}
+
 // ============================================================
 //  Public API
 // ============================================================
@@ -617,6 +835,7 @@ function init(consumerApi) {
   api = consumerApi;
   buildDOM();
   bindEvents();
+  bindSegmentEvents();
   // Auto-fit when a video loads
   api.video?.addEventListener('loadedmetadata', () => {
     setTimeout(() => {

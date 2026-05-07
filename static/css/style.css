@@ -625,6 +625,51 @@ kbd {
 .tl-clip.clip-logo  { border-left-color: var(--info);   background: rgba(110,168,255,0.12); color: #b6d2ff; }
 .tl-clip.clip-color { border-left-color: #ff7fb1;       background: rgba(255,127,177,0.12); color: #ffa3c7; }
 
+/* --- Multi-clip video segments --- */
+.tl-clip.clip-segment {
+  border-left-color: var(--info);
+  background: rgba(110,168,255,0.14);
+  color: #cfe2ff;
+}
+.tl-clip.clip-segment.is-active {
+  background: rgba(110,168,255,0.22);
+}
+.tl-clip.clip-segment.is-selected {
+  box-shadow: 0 0 0 1.5px var(--gold-2), 0 4px 12px rgba(0,0,0,0.5);
+  z-index: 3;
+}
+.tl-clip.clip-segment .tl-trim {
+  position: absolute; top: 0; bottom: 0; width: 6px;
+  background: rgba(255,255,255,0.05); cursor: ew-resize; transition: background .15s;
+}
+.tl-clip.clip-segment .tl-trim-left  { left: 0;  border-radius: 4px 0 0 4px; }
+.tl-clip.clip-segment .tl-trim-right { right: 0; border-radius: 0 4px 4px 0; }
+.tl-clip.clip-segment:hover .tl-trim { background: rgba(240,192,64,0.45); }
+.tl-clip-trans {
+  position: absolute; right: -4px; top: 50%; width: 8px; height: 8px;
+  background: var(--gold-2); border-radius: 50%; transform: translateY(-50%);
+  box-shadow: 0 0 6px var(--gold-2);
+}
+.tl-track.drag-over {
+  background: rgba(240,192,64,0.10);
+  outline: 1.5px dashed var(--gold-2);
+  outline-offset: -2px;
+}
+.tl-seg-menu {
+  position: fixed; z-index: 1000;
+  background: var(--s-2); border: 1px solid var(--s-5);
+  border-radius: 8px; padding: 4px; min-width: 160px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.tl-seg-menu button {
+  background: transparent; border: 0; color: var(--fg);
+  padding: 6px 10px; text-align: left; border-radius: 5px;
+  display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;
+}
+.tl-seg-menu button:hover { background: var(--s-4); }
+.tl-seg-menu [data-lucide] { width: 14px; height: 14px; }
+
 .tl-clip.selected {
   box-shadow: 0 0 0 1.5px var(--gold-2), 0 4px 12px rgba(0,0,0,0.5);
   z-index: 3;
