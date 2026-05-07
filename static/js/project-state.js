@@ -348,9 +348,14 @@ const isoNow = () => new Date().toISOString();
  * After this call, serialize() is pure: it only reads from state.
  */
 function ensureProjectId(state) {
-  if (!state._projectId) {
-    state._projectId = state.project || 'default';
-  }
+  // state.project is the project folder name on disk — that's the URL we save
+  // to and load from, so it MUST be the canonical doc id. Previously this
+  // helper only set _projectId once; after switching projects (or loading a
+  // doc from a different project), state.project would change but
+  // _projectId would stick, leading to "doc.id !== state.project" warnings
+  // and cross-project doc writes. Always re-sync to state.project.
+  const project = state.project || 'default';
+  state._projectId = project;
   if (state.video && !state.video._docId)  state.video._docId  = newClipId();
   if (state.audio && !state.audio._docId)  state.audio._docId  = newClipId();
   return state._projectId;
@@ -573,10 +578,14 @@ function deserialize(doc, projectId) {
     console.warn('[project-state] deserialize: validation issues', v.errors);
     // Continue best-effort. Strict callers should call validate() first.
   }
+  // pid resolution order: explicit projectId arg (the folder we're loading
+  // FROM — always authoritative when provided) > doc.id (best-effort
+  // fallback) > 'default'. _projectId returned to the caller mirrors pid
+  // so the next save() can't drift from the folder we loaded from.
   const pid = projectId || doc.id || 'default';
   const layers = (doc.layers || []).map(L => docToLayer(L, pid));
   return {
-    _projectId:  doc.id,
+    _projectId:  pid,
     _created_at: doc.created_at,
     template:    doc.edit_params?.style_id || 'custom',
     aspect:      doc.edit_params?.aspect_ratio || '16:9',
