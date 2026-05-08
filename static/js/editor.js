@@ -2352,7 +2352,27 @@ async function generateMagicEdit(opts) {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(editRequest),
     });
-    const data = await r.json();
+    // Read as text first so we can produce a useful error message when the
+    // body is empty (worker died, edge timeout, …) or HTML (Flask 500 page,
+    // gateway error). r.json() throws "Unexpected end of JSON input" on empty
+    // bodies which tells the user nothing about WHY.
+    const txt = await r.text();
+    console.log('[magic] /api/auto-edit', r.status, 'bytes=' + txt.length);
+    let data;
+    try { data = txt ? JSON.parse(txt) : {}; }
+    catch (parseErr) {
+      throw new Error(
+        `Server returned HTTP ${r.status} with non-JSON body ` +
+        `(${txt.length} chars): ${txt.slice(0, 200) || '(empty)'}`
+      );
+    }
+    if (!txt) {
+      throw new Error(
+        `Server returned HTTP ${r.status} with empty body — likely a ` +
+        `Codespaces edge timeout (30s default) or gunicorn worker crash. ` +
+        `Tail /tmp/mc.log for details.`
+      );
+    }
     if (!r.ok) throw new Error(data.error || `auto-edit failed (${r.status})`);
     plan = data;
   } catch (e) {
