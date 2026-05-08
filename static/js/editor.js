@@ -3548,10 +3548,20 @@ function showLibraryItemMenu(anchor, meta) {
   el.className = 'lib-item-menu';
   el.style.left = Math.round(r.left) + 'px';
   el.style.top  = Math.round(r.bottom + 4) + 'px';
-  el.innerHTML = `
-    <button data-act="add"><i data-lucide="plus"></i> Add to timeline</button>
-    <button data-act="preview"><i data-lucide="play"></i> Preview</button>
-  `;
+  // Menu items differ by kind so each action's effect is unambiguous —
+  // user reported the previous "Preview" button silently added an
+  // overlay layer on image kinds, which is not what "Preview" implies.
+  if (meta.kind === 'image') {
+    el.innerHTML = `
+      <button data-act="add-segment"><i data-lucide="plus"></i> Add as 3 s clip</button>
+      <button data-act="add-overlay"><i data-lucide="layers"></i> Add as overlay (full canvas)</button>
+    `;
+  } else {
+    el.innerHTML = `
+      <button data-act="add-segment"><i data-lucide="plus"></i> Add to timeline</button>
+      <button data-act="preview"><i data-lucide="play"></i> Preview</button>
+    `;
+  }
   document.body.appendChild(el);
   refreshIcons();
   // Auto-close on outside click / scroll / esc.
@@ -3571,9 +3581,9 @@ function showLibraryItemMenu(anchor, meta) {
   el.addEventListener('click', async (e) => {
     const act = e.target.closest('button')?.dataset.act;
     if (!act) return;
-    if (act === 'add') {
-      // Reuse the timeline's drag-drop append path so click and drag stay
-      // in lockstep. Fetch duration if the row didn't have it cached.
+    if (act === 'add-segment') {
+      // Probe duration on demand for videos that landed in the library
+      // before the lazy /api/probe round-trip completed.
       let dur = +meta.duration || 0;
       if (meta.kind === 'video' && dur <= 0) {
         try {
@@ -3592,25 +3602,23 @@ function showLibraryItemMenu(anchor, meta) {
         });
         toast('Added to timeline');
       } else if (meta.kind === 'image') {
-        // Match the drag-drop default: 3s still on the timeline.
+        // Image segment: 3 s still on the timeline.
         appendSegment({
           filename: meta.filename, url: meta.url, kind: 'image',
           sourceIn: 0, sourceOut: 3, _duration: 3,
         });
-        toast('Added to timeline');
+        toast('Added as 3 s clip');
       }
       try { await window.MC?.project?.save?.(state); } catch {}
+    } else if (act === 'add-overlay') {
+      // Image only — full-canvas overlay layer (state.layers).
+      applyImageFromLibrary(meta);
+      toast('Added as overlay');
     } else if (act === 'preview') {
-      // Image preview = drop a layer on the canvas (same as old click);
-      // video preview = activate it as the current clip without changing segs.
-      if (meta.kind === 'image') applyImageFromLibrary(meta);
-      else if (meta.kind === 'video') {
-        // Use a temporary one-off load: just point the video element at the
-        // file. Doesn't touch state.segments.
-        if (video) {
-          video.src = meta.url;
-          try { video.load(); video.play()?.catch(()=>{}); } catch {}
-        }
+      // Video only — load the file in <video> without touching segments.
+      if (video && meta.kind === 'video') {
+        video.src = meta.url;
+        try { video.load(); video.play()?.catch(()=>{}); } catch {}
       }
     }
     close();
