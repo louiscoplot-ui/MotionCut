@@ -639,17 +639,27 @@ aside.right-rail { position: relative; }
 
 /* --- Multi-clip video segments --- */
 .tl-clip.clip-segment {
-  border-left-color: var(--info);
-  background: rgba(110,168,255,0.14);
-  color: #cfe2ff;
+  /* Defaults — overridden by clip-c0..c4 below. White text on saturated
+     colour reads cleanly on both light and dark themes (was tinted-on-tinted
+     before, illegible on light theme). */
+  border-left-color: #4C7BC9;
+  background: #4C7BC9;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.35);  /* subtle drop so filenames stay readable on any clip colour */
 }
+.tl-clip.clip-segment .tl-clip-name,
+.tl-clip.clip-segment .tl-clip-dur { color: #ffffff !important; }
+.tl-clip.clip-segment [data-lucide] { color: #ffffff; }
 /* Color-cycle: 5 distinct hues so the user can spot which clip is which
-   without reading filenames. The order matches the user's spec. */
-.tl-clip.clip-segment.clip-c0 { border-left-color: #C9A84C; background: rgba(201,168,76,0.18);  color: #f3dfa7; }
-.tl-clip.clip-segment.clip-c1 { border-left-color: #4C7BC9; background: rgba(76,123,201,0.18);  color: #c2d6ff; }
-.tl-clip.clip-segment.clip-c2 { border-left-color: #4CC97B; background: rgba(76,201,123,0.18);  color: #b5edcb; }
-.tl-clip.clip-segment.clip-c3 { border-left-color: #C94C4C; background: rgba(201,76,76,0.18);   color: #f3b8b8; }
-.tl-clip.clip-segment.clip-c4 { border-left-color: #B47ACC; background: rgba(180,122,204,0.18); color: #e0c5ee; }
+   without reading filenames. Solid saturated backgrounds + white text. */
+.tl-clip.clip-segment.clip-c0 { background: #C9A84C; border-left-color: #8a7320; }   /* gold   */
+.tl-clip.clip-segment.clip-c1 { background: #4C7BC9; border-left-color: #2b56a3; }   /* blue   */
+.tl-clip.clip-segment.clip-c2 { background: #4CC97B; border-left-color: #2a9c5a; color: #0e2a1a; text-shadow: none; }   /* green — dark text reads better on bright green */
+.tl-clip.clip-segment.clip-c3 { background: #C94C4C; border-left-color: #8a2b2b; }   /* red    */
+.tl-clip.clip-segment.clip-c4 { background: #B47ACC; border-left-color: #82519c; }   /* purple */
+.tl-clip.clip-segment.clip-c2 .tl-clip-name,
+.tl-clip.clip-segment.clip-c2 .tl-clip-dur { color: #0e2a1a !important; }
+.tl-clip.clip-segment.clip-c2 [data-lucide] { color: #0e2a1a; }
 /* Thin vertical line between adjacent blocks. Sits as a sibling of the
    blocks inside the track — not a child — so it isn't clipped by hover/border. */
 .tl-cut {
