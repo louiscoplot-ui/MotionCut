@@ -271,6 +271,7 @@ function makeSegment(opts={}) {
     filename:    opts.filename    || null,
     url:         opts.url         || null,
     kind:        opts.kind        || 'video',  // 'video' | 'image'
+    track:       +opts.track || 0,            // multi-track row (0-indexed); each clip gets its own
     sourceIn:    sIn,
     sourceOut:   Math.max(sIn + 0.05, sOut),
     timelineIn:  +opts.timelineIn  || 0,
@@ -280,22 +281,53 @@ function makeSegment(opts={}) {
   };
 }
 
-/** Recompute timelineIn/timelineOut for every segment based on sourceIn/sourceOut + transitions.
- *  Mutates segments in place. transition lives on a segment and applies BETWEEN it and the next. */
+/** Recompute timelineIn/timelineOut for segments. Multi-track behaviour:
+ *  segments on DIFFERENT tracks are independent — their timelineIn is
+ *  whatever the user dragged it to (or the appendSegment default).
+ *  Segments on the SAME track DO chain end-to-end (legacy single-row mode);
+ *  each track gets its own cursor.
+ *  Width = sourceOut - sourceIn always. Transitions only matter for chained
+ *  segments on the same track, where they create overlap. */
 function reflowSegments(segments) {
-  let cursor = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const s = segments[i];
+  // First pass: ensure every segment has a real width.
+  for (const s of segments) {
     const dur = Math.max(0.05, s.sourceOut - s.sourceIn);
-    s.timelineIn  = cursor;
-    s.timelineOut = cursor + dur;
-    cursor = s.timelineOut;
-    // Crossfade/fadeblack overlap into the next segment by `transition.duration`.
-    const t = s.transition || { type: 'cut', duration: 0 };
-    const overlap = (t.type === 'crossfade' || t.type === 'xfade' || t.type === 'fade'
+    if (s.timelineIn == null) s.timelineIn = 0;
+    s.timelineOut = s.timelineIn + dur;
+  }
+  // Second pass: per-track chaining (only when ≥2 segments share a track).
+  const byTrack = new Map();
+  for (const s of segments) {
+    const t = +s.track || 0;
+    if (!byTrack.has(t)) byTrack.set(t, []);
+    byTrack.get(t).push(s);
+  }
+  for (const [, list] of byTrack) {
+    if (list.length < 2) continue;        // single-segment track: keep manual timelineIn
+    list.sort((a, b) => a.timelineIn - b.timelineIn);
+    let cursor = list[0].timelineIn;
+    list[0].timelineOut = cursor + (list[0].sourceOut - list[0].sourceIn);
+    cursor = list[0].timelineOut;
+    for (let i = 1; i < list.length; i++) {
+      const s = list[i];
+      const prev = list[i - 1];
+      const dur = Math.max(0.05, s.sourceOut - s.sourceIn);
+      // Chain only if the user hasn't manually placed this clip elsewhere.
+      // Heuristic: if its timelineIn falls inside the previous block, chain.
+      if (s.timelineIn < prev.timelineOut) {
+        s.timelineIn = prev.timelineOut;
+      }
+      s.timelineOut = s.timelineIn + dur;
+      // Crossfade overlap on the *previous* clip's transition.
+      const t = prev.transition || { type: 'cut', duration: 0 };
+      const overlap = (t.type === 'crossfade' || t.type === 'xfade' || t.type === 'fade'
                      || t.type === 'fade_to_black' || t.type === 'fadeblack' || t.type === 'dip-to-black')
                      ? Math.max(0, +t.duration || 0) : 0;
-    cursor -= overlap;
+      if (overlap > 0) {
+        s.timelineIn  -= overlap;
+        s.timelineOut -= overlap;
+      }
+    }
   }
   return segments;
 }
@@ -362,10 +394,27 @@ function activateSegment(seg, sourceTime) {
   }
 }
 
-/** Append a segment to the end of the timeline and activate it if it's the first. */
+/** Append a segment to the timeline. Multi-track NLE behaviour: each new
+ *  clip lands on its OWN track (next available row) and starts at t=0,
+ *  not chained after the previous clip. The user repositions it manually
+ *  by dragging the block horizontally. */
 function appendSegment(opts) {
-  const seg = makeSegment(opts);
+  // Pick the next free track index. Existing tracks stay where they are;
+  // a new clip never overwrites or shares a row by default.
+  const usedTracks = new Set((state.segments || []).map(s => +s.track || 0));
+  let track = 0;
+  while (usedTracks.has(track)) track++;
+  const seg = makeSegment({
+    ...opts,
+    track: opts.track != null ? opts.track : track,
+    // Default timelineIn = 0 so each clip starts at the same moment.
+    // User drags the body horizontally to reposition.
+    timelineIn:  opts.timelineIn != null ? opts.timelineIn : 0,
+  });
+  // Compute timelineOut from source range so the block has a real width.
+  seg.timelineOut = seg.timelineIn + (seg.sourceOut - seg.sourceIn);
   state.segments.push(seg);
+  // Reflow only chains segments that share the same track (legacy single-track).
   reflowSegments(state.segments);
   if (state.segments.length === 1) activateSegment(seg, seg.sourceIn);
   state.selectedSegmentId = seg.id;

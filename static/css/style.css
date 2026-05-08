@@ -650,6 +650,20 @@ aside.right-rail { position: relative; }
 .tl-clip.clip-segment .tl-clip-name,
 .tl-clip.clip-segment .tl-clip-dur { color: #ffffff !important; }
 .tl-clip.clip-segment [data-lucide] { color: #ffffff; }
+/* Multi-track: each clip lives in its own .tl-row (track row). The
+   row is absolutely positioned inside the parent .tl-track, and the
+   .tl-clip blocks inside it are positioned relative to the row. */
+.tl-track[data-kind="video"] { position: relative; }
+.tl-row {
+  position: absolute; left: 0; right: 0;
+  display: block;
+  border-bottom: 1px dashed rgba(127,127,127,0.18);
+}
+.tl-row:last-child { border-bottom: 0; }
+.tl-clip.clip-segment { cursor: grab; }
+.tl-clip.clip-segment:active { cursor: grabbing; }
+/* Trim handles override the grab cursor — they're a separate affordance. */
+.tl-clip.clip-segment .tl-trim { cursor: ew-resize; }
 /* Color-cycle: 5 distinct hues so the user can spot which clip is which
    without reading filenames. Solid saturated backgrounds + white text. */
 .tl-clip.clip-segment.clip-c0 { background: #C9A84C; border-left-color: #8a7320; }   /* gold   */

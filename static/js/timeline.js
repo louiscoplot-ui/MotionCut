@@ -208,38 +208,41 @@ function renderVideoTrack(dur) {
     refreshIcons();
     return;
   }
-  // Multi-clip render. Each segment gets its own block; we add explicit
-  // trim handles on the left/right edges. The thin divider between blocks
-  // (the cut) is just a 2px line dropped between adjacent blocks via the
-  // .tl-cut element below. Each block cycles through 5 colors so users can
-  // visually track which clip is which without reading filenames.
+  // Multi-track render: group segments by their `track` field and render
+  // each track as its own row inside .tl-track-video. Each row gets a
+  // colour-cycled block at its timelineIn/timelineOut. User drags the
+  // body horizontally to reposition (handler in bindSegmentEvents).
   const COLOR_COUNT = 5;
-  const last = segs.length - 1;
-  tr.innerHTML = segs.map((s, i) => {
-    const left = s.timelineIn * pps;
-    const w    = Math.max(8, (s.timelineOut - s.timelineIn) * pps);
-    const sel  = (s.id === api.state.selectedSegmentId) ? 'is-selected' : '';
-    const act  = (s.id === api.state.activeSegmentId)   ? 'is-active'   : '';
-    const colorClass = `clip-c${i % COLOR_COUNT}`;
-    const display = (s.filename || 'clip').replace(/^[a-f0-9]{6,16}_/, '').slice(0, 32);
-    const trans = s.transition && s.transition.type !== 'cut' && i < last
-      ? `<span class="tl-clip-trans" title="${escapeHTML(s.transition.type)} ${(+s.transition.duration||0).toFixed(2)}s"></span>` : '';
-    // Cut marker between this clip and the next. Render it as a separate
-    // sibling so it sits visually on top of both blocks at the boundary.
-    const cut = i < last
-      ? `<div class="tl-cut" style="left:${(s.timelineOut * pps) - 1}px" title="Cut ${i + 1}"></div>` : '';
+  const trackIds = [...new Set(segs.map(s => +s.track || 0))].sort((a, b) => a - b);
+  // Re-size the host track to fit N rows; CSS variable read by .tl-track-video.
+  const ROW_H = 32;
+  tr.style.height = `${Math.max(ROW_H, trackIds.length * ROW_H)}px`;
+  tr.innerHTML = trackIds.map((trackId, rowIdx) => {
+    const rowSegs = segs.filter(s => (+s.track || 0) === trackId);
+    const blocks = rowSegs.map(s => {
+      const left = s.timelineIn * pps;
+      const w    = Math.max(8, (s.timelineOut - s.timelineIn) * pps);
+      const sel  = (s.id === api.state.selectedSegmentId) ? 'is-selected' : '';
+      const act  = (s.id === api.state.activeSegmentId)   ? 'is-active'   : '';
+      const colorClass = `clip-c${trackId % COLOR_COUNT}`;
+      const display = (s.filename || 'clip').replace(/^[a-f0-9]{6,16}_/, '').slice(0, 32);
+      return `
+        <div class="tl-clip clip-segment ${colorClass} ${sel} ${act}"
+             data-seg-id="${escapeHTML(s.id)}"
+             data-kind="${escapeHTML(s.kind || 'video')}"
+             data-track="${trackId}"
+             style="left:${left}px;width:${w}px">
+          <span class="tl-trim tl-trim-left"  data-trim="left"></span>
+          <i data-lucide="${s.kind === 'image' ? 'image' : 'film'}"></i>
+          <span class="tl-clip-name">${escapeHTML(display)}</span>
+          <span class="tl-clip-dur mono">${fmtT(s.timelineOut - s.timelineIn)}</span>
+          <span class="tl-trim tl-trim-right" data-trim="right"></span>
+        </div>`;
+    }).join('');
     return `
-      <div class="tl-clip clip-segment ${colorClass} ${sel} ${act}"
-           data-seg-id="${escapeHTML(s.id)}"
-           data-kind="${escapeHTML(s.kind || 'video')}"
-           style="left:${left}px;width:${w}px">
-        <span class="tl-trim tl-trim-left"  data-trim="left"></span>
-        <i data-lucide="${s.kind === 'image' ? 'image' : 'film'}"></i>
-        <span class="tl-clip-name">${escapeHTML(display)}</span>
-        <span class="tl-clip-dur mono">${fmtT(s.timelineOut - s.timelineIn)}</span>
-        <span class="tl-trim tl-trim-right" data-trim="right"></span>
-        ${trans}
-      </div>${cut}`;
+      <div class="tl-row" data-track="${trackId}" style="top:${rowIdx * ROW_H}px;height:${ROW_H}px">
+        ${blocks}
+      </div>`;
   }).join('');
   refreshIcons();
 }
@@ -503,15 +506,23 @@ function bindEvents() {
   // Mouse interactions on the canvas
   area.addEventListener('mousedown', onAreaMouseDown);
 
-  // Wheel = scroll horizontally; Cmd/Ctrl+wheel = zoom
-  area.addEventListener('wheel', (e) => {
+  // Wheel handler at the *panel* level (the whole .tl, not just the
+  // tracks-area). User reported Cmd+scroll didn't work — the cause was
+  // hovering over the track header column or the toolbar where the
+  // listener wasn't bound. Now anywhere on the timeline panel works.
+  // We still need passive:false to be allowed to preventDefault().
+  const tlPanel = document.querySelector('.tl') || area;
+  tlPanel.addEventListener('wheel', (e) => {
     if (e.ctrlKey || e.metaKey) {
+      // Cmd/Ctrl + wheel = zoom timeline (anchor to cursor X).
       e.preventDefault();
+      e.stopPropagation();   // don't let the browser also zoom the page
       setZoom(pps * (e.deltaY < 0 ? 1.10 : 1/1.10), e.clientX);
-    } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-      // Horizontal scroll already handled by browser if deltaX
-    } else {
-      // Convert vertical wheel to horizontal scroll for convenience
+      return;
+    }
+    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    // Plain vertical wheel inside the tracks area = horizontal scroll.
+    if (area.contains(e.target)) {
       area.scrollLeft += e.deltaY;
       e.preventDefault();
     }
@@ -676,13 +687,17 @@ function splitLayerAt(id, t) {
 // ============================================================
 //  Segment interactions (multi-clip video track)
 // ============================================================
-let segDrag = null;       // { id, side: 'left'|'right', startX, startSourceIn, startSourceOut }
+let segDrag = null;       // trim drag: { id, side: 'left'|'right', startX, startSourceIn, startSourceOut }
+let segMove = null;       // body drag: { id, startX, startTimelineIn, moved }
 
 function bindSegmentEvents() {
   const tr = $('tl-track-video');
   if (!tr) return;
 
-  // Click on a segment body = select. Click on a trim handle starts a drag.
+  // Mousedown on a segment: trim handle vs body. Trim handles start a
+  // resize drag immediately. Body starts a *potential* move drag — we
+  // only flip into "moving" mode when the cursor travels >3 px so a
+  // simple click still selects + jumps the playhead.
   tr.addEventListener('mousedown', (e) => {
     const handle = e.target.closest('.tl-trim');
     const clip   = e.target.closest('.clip-segment');
@@ -703,12 +718,15 @@ function bindSegmentEvents() {
       window.addEventListener('mouseup',   onSegDragUp);
       return;
     }
-    // Plain body click: select + jump playhead to segment start
+    // Body: prepare a potential move drag.
     e.stopPropagation();
-    api.state.selectedSegmentId = id;
-    api.video.currentTime = seg.timelineIn + 0.001;
-    render();
-    api.draw();
+    segMove = {
+      id, startX: e.clientX,
+      startTimelineIn: seg.timelineIn,
+      moved: false,
+    };
+    window.addEventListener('mousemove', onSegMoveMove);
+    window.addEventListener('mouseup',   onSegMoveUp);
   });
 
   // Right-click context menu: remove segment.
@@ -846,6 +864,47 @@ function reflowSegmentsInState() {
   if (typeof api.reflowSegments === 'function') {
     api.reflowSegments(api.state.segments);
   }
+}
+
+// Body drag — repositions the segment in time (timelineIn).
+// Click without movement still selects + jumps the playhead.
+function onSegMoveMove(e) {
+  if (!segMove) return;
+  const seg = api.state.segments.find(s => s.id === segMove.id);
+  if (!seg) return;
+  const dxPx = e.clientX - segMove.startX;
+  if (Math.abs(dxPx) < 3 && !segMove.moved) return;        // dead-zone before promoting to drag
+  segMove.moved = true;
+  const dxSec = dxPx / pps;
+  const dur = seg.sourceOut - seg.sourceIn;
+  seg.timelineIn  = Math.max(0, segMove.startTimelineIn + dxSec);
+  seg.timelineOut = seg.timelineIn + dur;
+  // Keep cursor as a grab affordance during drag.
+  document.body.style.cursor = 'grabbing';
+  render();
+}
+
+function onSegMoveUp() {
+  window.removeEventListener('mousemove', onSegMoveMove);
+  window.removeEventListener('mouseup',   onSegMoveUp);
+  document.body.style.cursor = '';
+  if (!segMove) return;
+  if (segMove.moved) {
+    // Real drag finished: snapshot so undo works.
+    reflowSegmentsInState();
+    api.snapshot();
+    render();
+  } else {
+    // No movement: treat as a click → select + seek.
+    api.state.selectedSegmentId = segMove.id;
+    const seg = api.state.segments.find(s => s.id === segMove.id);
+    if (seg && api.video) {
+      try { api.video.currentTime = seg.timelineIn + 0.001; } catch {}
+    }
+    render();
+    api.draw?.();
+  }
+  segMove = null;
 }
 
 function showSegmentMenu(x, y, segId) {
