@@ -1974,6 +1974,30 @@ def too_large(_e):
     return jsonify({"error": "file too large (limit 2GB)"}), 413
 
 
+@app.errorhandler(500)
+@app.errorhandler(Exception)
+def _all_unhandled(e):
+    """Last-resort handler — any unhandled exception in any route comes here.
+    Without this, Flask's default 500 page is HTML and the frontend's
+    `await response.json()` blows up with 'Unexpected end of JSON input'
+    (Werkzeug truncates the body in some error paths). Always return JSON
+    + log the trace so the operator can read it in /tmp/mc.log.
+
+    HTTP exceptions (404, 405, etc.) pass through with their original status.
+    """
+    import traceback
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description, "code": e.code}), e.code
+    tb = traceback.format_exc()
+    print("[flask] UNHANDLED:", e, "\n", tb, flush=True)
+    return jsonify({
+        "error": f"server error: {e!r}",
+        "type":  type(e).__name__,
+        "trace": tb.splitlines()[-8:],
+    }), 500
+
+
 # ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
