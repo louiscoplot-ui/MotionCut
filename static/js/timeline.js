@@ -953,8 +953,8 @@ function startPlayheadLoop() {
   const tick = () => {
     if (api?.video) {
       const t = api.video.currentTime || 0;
-      // Multi-clip: if the playhead crossed a cut, swap the source video.
-      maybeSwapSegment(t);
+      // Auto-advance across segment boundaries while playing.
+      checkSegmentBoundary();
       if (Math.abs(t - lastT) > 0.01) {
         updatePlayhead();
         lastT = t;
@@ -965,17 +965,61 @@ function startPlayheadLoop() {
   requestAnimationFrame(tick);
 }
 
-let _lastActiveSegId = null;
-function maybeSwapSegment(t) {
+let _lastBoundaryCheck = 0;
+let _advancing = false;
+/**
+ * While the user is playing back, watch for the active segment reaching
+ * its sourceOut and jump to the next segment in timeline order.
+ *
+ * The previous implementation (maybeSwapSegment) called segmentAt(t) with
+ * t = video.currentTime — but currentTime is local to the active source
+ * file (clamped 0..duration). That worked when every segment shared a
+ * single track and chained end-to-end (timeline-time == currentTime then),
+ * but broke as soon as the user put clips on separate tracks: video 1
+ * ended at currentTime=12, never reached video 2's timelineIn=15, and
+ * playback froze.
+ *
+ * New approach: drive advancement off the SEGMENT'S sourceOut, not the
+ * timeline. When playing the active segment hits its trim-out, we look
+ * up the next segment by its timelineIn and call activateSegment().
+ */
+function checkSegmentBoundary() {
+  // Throttle — every frame is overkill, ~10 Hz catches every realistic cut.
+  const now = performance.now();
+  if (now - _lastBoundaryCheck < 100) return;
+  _lastBoundaryCheck = now;
+
   const segs = api?.state?.segments;
-  if (!segs || !segs.length || !api.segmentAt) return;
-  const { seg, st } = api.segmentAt(t);
-  if (!seg) return;
-  if (seg.id !== _lastActiveSegId) {
-    _lastActiveSegId = seg.id;
-    api.activateSegment?.(seg, st);
-    render();
+  if (!segs || !segs.length) return;
+  if (!api.video || api.video.paused || api.video.ended || _advancing) return;
+
+  const cur = segs.find(s => s.id === api.state.activeSegmentId);
+  if (!cur) return;
+  // Hit the trim-out (sourceOut) of the active segment? Time to advance.
+  // 0.05s slack so we don't overshoot the last frame of the clip.
+  if (api.video.currentTime + 0.05 < cur.sourceOut) return;
+
+  // Advance to the next segment in timeline order. Multi-track: pick the
+  // segment with the smallest timelineIn ≥ cur.timelineOut. If none,
+  // playback is over — pause cleanly.
+  const sorted = [...segs].sort((a, b) =>
+    (a.timelineIn - b.timelineIn) || ((+a.track || 0) - (+b.track || 0))
+  );
+  const idx = sorted.findIndex(s => s.id === cur.id);
+  const next = sorted[idx + 1];
+  if (!next) {
+    api.video.pause();
+    return;
   }
+  _advancing = true;
+  api.activateSegment?.(next, next.sourceIn);
+  // activateSegment loads a new src async; wait for it to be ready before
+  // resuming play. ~120 ms is plenty for a cached file.
+  setTimeout(() => {
+    _advancing = false;
+    try { api.video.play()?.catch(() => {}); } catch {}
+  }, 120);
+  render();
 }
 
 // ============================================================
