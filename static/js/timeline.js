@@ -84,15 +84,17 @@ function buildDOM() {
             <div class="tl-playhead" id="tl-playhead"></div>
           </div>
         </div>
-        <!-- Discoverability CTA: only shown when segments exist. Clicking it
-             triggers the existing Magic Edit flow (same as topbar btn-magic). -->
-        <div class="tl-magic-cta hidden" id="tl-magic-cta">
-          <button class="cta-magic" id="tl-cta-magic" type="button">
-            <i data-lucide="sparkles"></i>
-            <span class="cta-label">Generate AI Edit</span>
-            <span class="cta-meta mono"></span>
-          </button>
-        </div>
+      </div>
+      <!-- Discoverability CTA: lives OUTSIDE .tl-body so the grid (headers
+           column + area column) doesn't constrain its width to one column.
+           Only shown when segments exist; clicking it triggers the
+           existing Magic Edit flow (same as topbar btn-magic). -->
+      <div class="tl-magic-cta hidden" id="tl-magic-cta">
+        <button class="cta-magic" id="tl-cta-magic" type="button">
+          <i data-lucide="sparkles"></i>
+          <span class="cta-label">Generate AI Edit</span>
+          <span class="cta-meta mono"></span>
+        </button>
       </div>
     </div>`;
   refreshIcons();
