@@ -214,9 +214,47 @@ function renderVideoTrack(dur) {
   // body horizontally to reposition (handler in bindSegmentEvents).
   const COLOR_COUNT = 5;
   const trackIds = [...new Set(segs.map(s => +s.track || 0))].sort((a, b) => a - b);
-  // Re-size the host track to fit N rows; CSS variable read by .tl-track-video.
-  const ROW_H = 32;
+  // Match the .tl-header height (36 px) so the left-rail labels line up
+  // perfectly with each row — was 32 before, which caused the visual
+  // misalignment the user reported (rows appeared to bleed into the
+  // OVERLAYS / AUDIO header rows).
+  const ROW_H = 36;
   tr.style.height = `${Math.max(ROW_H, trackIds.length * ROW_H)}px`;
+  // CapCut/DaVinci-style multi-track labels: keep the existing "Video"
+  // header at row 0 (it owns the Clear button + click listener) and
+  // inject V2 / V3 / … siblings ONLY when we actually have more than
+  // one row. This way we don't have to re-bind the Clear handler on
+  // every render. The injected siblings carry the .video-sub class so
+  // we can remove + recreate them cleanly.
+  const headerCol = document.querySelector('.tl-headers');
+  if (headerCol) {
+    headerCol.querySelectorAll('.tl-header.video-sub').forEach(el => el.remove());
+    const headV1 = headerCol.querySelector('.tl-header[data-kind="video"]');
+    if (headV1) {
+      if (trackIds.length > 1) {
+        headV1.classList.add('video-multi');
+        headV1.style.height = ROW_H + 'px';
+        // Renumber V1 in place (icon kept).
+        const v1Label = headV1.querySelector('span');
+        if (v1Label) v1Label.textContent = 'V1';
+        let prev = headV1;
+        for (let i = 1; i < trackIds.length; i++) {
+          const sub = document.createElement('div');
+          sub.className = 'tl-header video-sub';
+          sub.style.height = ROW_H + 'px';
+          sub.innerHTML = `<i data-lucide="film"></i><span>V${i + 1}</span>`;
+          prev.parentNode.insertBefore(sub, prev.nextSibling);
+          prev = sub;
+        }
+      } else {
+        headV1.classList.remove('video-multi');
+        headV1.style.height = '';
+        const v1Label = headV1.querySelector('span');
+        // Restore the single-track label from i18n if available.
+        if (v1Label) v1Label.textContent = window.MC?.i18n?.t?.('tl.video') || 'Video';
+      }
+    }
+  }
   tr.innerHTML = trackIds.map((trackId, rowIdx) => {
     const rowSegs = segs.filter(s => (+s.track || 0) === trackId);
     const blocks = rowSegs.map(s => {

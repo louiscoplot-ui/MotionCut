@@ -660,6 +660,19 @@ aside.right-rail { position: relative; }
   border-bottom: 1px dashed rgba(127,127,127,0.18);
 }
 .tl-row:last-child { border-bottom: 0; }
+
+/* When the video header is showing V1/V2/V3 sub-rows, dim the gold
+   icon a bit on V2+ so the eye picks V1 as the "primary" row (matches
+   how DaVinci de-emphasises secondary tracks). */
+.tl-header.video-sub { padding-left: 18px; opacity: 0.78; }
+.tl-header.video-sub [data-lucide] { color: var(--gold-2); opacity: 0.8; }
+.tl-header.video-multi { padding-left: 10px; }
+
+/* Give the timeline panel a bit of room below the tracks à la DaVinci —
+   the playhead drag area + visual breathing room. The tracks scroll
+   horizontally; this is purely a vertical pad. */
+.tl-area { padding-bottom: 12px; }
+.tl-canvas { padding-bottom: 8px; }
 .tl-clip.clip-segment { cursor: grab; }
 .tl-clip.clip-segment:active { cursor: grabbing; }
 /* Trim handles override the grab cursor — they're a separate affordance. */
