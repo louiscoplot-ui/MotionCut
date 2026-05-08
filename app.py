@@ -1235,7 +1235,29 @@ def api_auto_edit():
     POST EditRequest → return EditPlan.
     All clip analyses are cached per project — repeat calls for the same
     clipset are fast (only the planning step re-runs).
+
+    Wrapped in a top-level try/except so any unhandled exception still
+    returns a JSON error body. The user reported "Unexpected end of JSON
+    input" client-side, which means the response body was empty — i.e.
+    the worker crashed mid-request without producing any output. With
+    this guard the failure mode becomes a clear JSON {error, type, trace}.
     """
+    try:
+        return _api_auto_edit_impl()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Print the full trace to gunicorn's stderr so the operator can
+        # tail /tmp/mc.log and see what actually broke.
+        print("[auto-edit] UNHANDLED:", e, "\n", tb, flush=True)
+        return jsonify({
+            "error": f"auto-edit crashed: {e!r}",
+            "type":  type(e).__name__,
+            "trace": tb.splitlines()[-6:],   # last few frames, enough to triage
+        }), 500
+
+
+def _api_auto_edit_impl():
     data = request.get_json(force=True, silent=True) or {}
     pid       = data.get("projectId") or "default"
     duration  = float(data.get("duration") or 30)
