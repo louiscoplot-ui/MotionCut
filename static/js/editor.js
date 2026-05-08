@@ -2308,7 +2308,17 @@ async function generateMagicEdit(opts) {
     plan = data;
   } catch (e) {
     hideMagicLoading();
-    toast('Auto-edit failed: ' + e.message);
+    // Inline error inside the modal — user reported a toast vanishing too
+    // fast to read. The button is back via hideMagicLoading() so they can
+    // tweak settings and retry without closing the modal.
+    const errBox = $('magic-error');
+    if (errBox) {
+      errBox.textContent = 'Auto-edit failed: ' + (e.message || e);
+      errBox.classList.remove('hidden');
+    } else {
+      toast('Auto-edit failed: ' + e.message);
+    }
+    console.warn('[magic] auto-edit failed', e);
     return;
   }
 
@@ -2390,6 +2400,18 @@ function showMagicLoading(text) {
 
 function hideMagicLoading() {
   $('magic-loading')?.classList.add('hidden');
+  // Restore the initial-state buttons. Without this, every error path that
+  // bails out via hideMagicLoading() leaves the modal with NO Generate
+  // button visible (showMagicLoading hid it on the way in). User reported
+  // exactly that: "auto-edit failed" then no way to retry.
+  const go = $('magic-go');
+  if (go) {
+    go.classList.remove('hidden');
+    go.disabled = false;
+    const lbl = go.querySelector('span');
+    if (lbl) lbl.textContent = window.MC?.i18n?.t?.('magic.generate') || 'Generate cinematic edit';
+  }
+  $('magic-summary')?.classList.remove('hidden');
 }
 
 function resetMagicModal() {
