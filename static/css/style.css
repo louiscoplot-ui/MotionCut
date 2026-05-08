@@ -654,12 +654,26 @@ aside.right-rail { position: relative; }
    row is absolutely positioned inside the parent .tl-track, and the
    .tl-clip blocks inside it are positioned relative to the row. */
 .tl-track[data-kind="video"] { position: relative; }
+/* Multi-track row: hosts one or more clip blocks. The host .tl-track-video
+   gets dynamic height = N * 36 px set in JS; each .tl-row is absolutely
+   placed at top: N*36 with height: 36 — same number used for the left-rail
+   header so the two columns line up pixel-perfect. */
 .tl-row {
   position: absolute; left: 0; right: 0;
   display: block;
-  border-bottom: 1px dashed rgba(127,127,127,0.18);
+  box-sizing: border-box;
+  border-bottom: 1px solid rgba(127,127,127,0.14);
 }
 .tl-row:last-child { border-bottom: 0; }
+/* Inside a row, the clip block fills the row instead of using the
+   default top:4 / height:28 of .tl-clip. Without this override clips
+   floated 4 px above + below their row, leaving the candy-stripe gaps
+   the user reported between V1 / V2 / V3. */
+.tl-row > .tl-clip {
+  top: 3px;
+  height: 30px;
+  border-radius: 4px;
+}
 
 /* When the video header is showing V1/V2/V3 sub-rows, dim the gold
    icon a bit on V2+ so the eye picks V1 as the "primary" row (matches
