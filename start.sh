@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # MotionCut launcher.
 # - Kills whatever is on port 5000 (the previous Flask, if any).
-# - Starts app.py fully detached: nohup ignores SIGHUP, stdin is closed so
-#   the bash terminal can't auto-suspend the Flask reloader child, and
-#   `disown` removes the job from this shell's list (no more "[1]+ Stopped").
+# - Starts the app under GUNICORN, not Werkzeug, so it works on Codespaces.
+#   Werkzeug 3 added a DNS-rebinding host-allowlist check that rejects the
+#   *.app.github.dev hostname; gunicorn bypasses that entirely.
+# - --reload makes gunicorn pick up Python file edits automatically (so the
+#   auto-pull thread + edit cycle still feels like dev).
 # - Logs go to /tmp/mc.log — tail -f to watch them, Ctrl+C closes the tail
 #   but leaves the server running.
 # Usage:
@@ -19,16 +21,32 @@ LOG=/tmp/mc.log
 
 cd "$(dirname "$0")"
 
+# Make sure deps are installed in the current env. Idempotent — pip skips
+# packages already present, and a missing apt ffmpeg fails loudly in the
+# /api/health response rather than at boot.
+if ! command -v gunicorn >/dev/null 2>&1; then
+  echo "Installing Python deps…"
+  pip install -q -r requirements.txt
+fi
+
 # 1) Free the port. fuser -k sends SIGKILL; tolerate the case where nothing
 #    is listening (subshell, stderr suppressed). Sleep gives the kernel a
 #    moment to release the socket before bind() retries.
 fuser -k "${PORT}/tcp" 2>/dev/null || true
 sleep 1
 
-# 2) Detach and start. < /dev/null is the key bit — without it, Flask's
-#    debug-mode reloader child tries to read the terminal and bash sends
-#    SIGTTIN which suspends the process (and frees nothing).
-nohup python3 app.py > "$LOG" 2>&1 < /dev/null &
+# 2) Detach and start. < /dev/null is the key bit — without it, any child
+#    that tries to read the terminal would get SIGTTIN and the whole
+#    process group would suspend without freeing the port.
+nohup gunicorn app:app \
+  --bind "0.0.0.0:${PORT}" \
+  --workers 1 \
+  --threads 8 \
+  --timeout 0 \
+  --reload \
+  --access-logfile - \
+  --error-logfile - \
+  > "$LOG" 2>&1 < /dev/null &
 PID=$!
 disown || true
 
