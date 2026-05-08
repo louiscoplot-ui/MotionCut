@@ -63,6 +63,55 @@ const history = { stack: [], idx: -1, max: 60 };
 //  Helpers
 // ============================================================
 const $ = (id) => document.getElementById(id);
+
+/**
+ * Build pulse: open an SSE stream that emits the current server SHA every
+ * few seconds. When the SHA changes vs what was baked into the HTML at
+ * page-load, auto-reload the tab. Replaces the manual hard-refresh dance.
+ *
+ * The user has been chasing stale-cache bugs all session; this closes
+ * that loop. State is autosaved on every snapshot() (3s debounce), so a
+ * mid-edit reload restores the project from disk seamlessly via
+ * restoreFromDocument().
+ */
+function startBuildPulse() {
+  // Read the SHA the page was rendered with — every <script> tag in
+  // index.html ends with ?v={{ build_version }}. We pull it from one of
+  // those URLs rather than baking it again, so this stays in sync.
+  let initialSha = null;
+  for (const s of document.querySelectorAll('script[src]')) {
+    const m = s.src.match(/[?&]v=([^&]+)/);
+    if (m) { initialSha = m[1]; break; }
+  }
+  if (!initialSha) return;     // can't compare → bail safely
+
+  let reloading = false;
+  const reload = (newSha) => {
+    if (reloading) return;
+    reloading = true;
+    console.log(`%c[MC] new build ${newSha} — reloading…`, 'color:#f0c040;font-weight:bold');
+    // Brief delay so any pending autosave can land before we navigate.
+    setTimeout(() => location.reload(), 400);
+  };
+  const open = () => {
+    const es = new EventSource('/api/build-pulse');
+    es.onmessage = (ev) => {
+      try {
+        const { sha } = JSON.parse(ev.data);
+        if (sha && sha !== initialSha && sha !== 'dev') reload(sha);
+      } catch {}
+    };
+    es.onerror = () => {
+      // Codespaces sometimes drops idle connections — close + reopen
+      // after a short backoff so we don't miss the next pulse.
+      es.close();
+      setTimeout(open, 5000);
+    };
+    return es;
+  };
+  open();
+}
+
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function fmtTime(t) {
@@ -4293,6 +4342,7 @@ function init() {
   // they see a fresh banner — if it's missing or stale, browser cache
   // is the cause and a hard reload (Cmd+Shift+R) fixes it.
   console.log('%c[MC] editor build', 'color:#f0c040;font-weight:bold', '— multi-clip + premium media panel');
+  startBuildPulse();
   // Bind DOM refs
   video        = $('video');
   canvas       = $('canvas');

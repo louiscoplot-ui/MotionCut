@@ -300,6 +300,40 @@ def api_version():
         return jsonify({"sha": None})
 
 
+@app.route("/api/build-pulse")
+def api_build_pulse():
+    """Server-Sent Events stream that emits the current build SHA every few
+    seconds. The frontend opens an EventSource on this endpoint at boot and
+    auto-reloads itself when the SHA changes — eliminating the "I push,
+    you Cmd+Shift+R" loop the user has been stuck in.
+
+    Each event is a JSON line: {"sha": "abc1234"}. Heartbeats happen even
+    when nothing changed (keeps idle proxies from killing the connection).
+    """
+    def gen():
+        last = None
+        # Send the first SHA immediately so the client can compare against
+        # the SHA baked into its HTML at load time.
+        while True:
+            try:
+                sha = _git_short_sha()
+            except Exception:
+                sha = "dev"
+            payload = json.dumps({"sha": sha})
+            yield f"data: {payload}\n\n"
+            last = sha
+            # Heartbeat / poll cadence. 4s is fast enough to feel instant
+            # after a push but light enough to not flood the gunicorn
+            # worker with subprocess spawns.
+            time.sleep(4)
+    resp = Response(gen(), mimetype="text/event-stream")
+    # Disable proxy buffering so each event reaches the client without
+    # waiting for a chunk to fill (Codespaces edge can buffer otherwise).
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
 @app.route("/api/health")
 def health():
     return jsonify({"ok": True, "ffmpeg": ffmpeg_available()})
