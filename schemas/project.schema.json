@@ -94,6 +94,8 @@
           "clip_id":    { "type": "string", "pattern": "^clip_[A-Za-z0-9]+$" },
           "source_in":  { "type": "number", "minimum": 0 },
           "source_out": { "type": "number", "minimum": 0 },
+          "track":      { "type": "integer", "minimum": 0, "description": "Multi-track row index. 0 = first row. Each clip can live on its own track for independent placement (CapCut-style)." },
+          "timeline_in":{ "type": "number", "minimum": 0, "description": "Where this segment starts on the global timeline (seconds). Independent of source_in." },
           "transition": {
             "type": "object",
             "additionalProperties": false,

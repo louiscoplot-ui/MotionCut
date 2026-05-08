@@ -2446,12 +2446,18 @@ async function applyMagicPlan() {
   //    gets activated as the "playing" source. inMark/outMark are cleared —
   //    multi-clip exports use the segments array, not the legacy marks.
   if (Array.isArray(plan.segments) && plan.segments.length) {
-    state.segments = plan.segments.map(s => makeSegment({
+    // Multi-track behaviour: give each plan segment its own row so the
+    // user can see / move / trim each clip independently. Without this
+    // the AI plan would collapse all clips into a single track and the
+    // user couldn't untangle them.
+    state.segments = plan.segments.map((s, i) => makeSegment({
       filename:  s.clipFilename,
       url:       segmentUrl(s.clipFilename),
       kind:      'video',
       sourceIn:  s.sourceIn,
       sourceOut: s.sourceOut,
+      track:     i,                  // one row per AI-picked clip
+      timelineIn: 0,                 // all start at t=0; user nudges them
       transition: s.transition || { type: 'cut', duration: 0 },
     }));
     reflowSegments(state.segments);

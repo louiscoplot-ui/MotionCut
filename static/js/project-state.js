@@ -432,7 +432,11 @@ function serialize(state, opts = {}) {
         clip_id:    cid,
         source_in:  +s.sourceIn  || 0,
         source_out: Math.max((+s.sourceIn || 0) + 0.05, +s.sourceOut || 0),
-        transition: { type: ttype, duration: +t.duration || 0 },
+        // Multi-track placement — track index + manual timeline position.
+        // Without these, every reload collapses the timeline back onto row 0.
+        track:       Math.max(0, parseInt(s.track || 0, 10) || 0),
+        timeline_in: Math.max(0, +s.timelineIn || 0),
+        transition:  { type: ttype, duration: +t.duration || 0 },
       });
     }
   } else {
@@ -620,12 +624,16 @@ function deserialize(doc, projectId) {
       const docSegs = doc.segments || [];
       if (!docSegs.length) return [];
       const clipById = new Map((doc.clips || []).map(c => [c.id, c]));
+      // Detect "legacy" docs (saved before track/timeline_in landed in schema):
+      // every persisted segment is missing both fields. In that case we
+      // restore the old single-track chained layout. Modern docs preserve
+      // each segment's track + timeline_in as written.
+      const isLegacy = docSegs.every(s => s.track == null && s.timeline_in == null);
       let cursor = 0;
       const out = [];
-      for (const s of docSegs) {
+      docSegs.forEach((s, idx) => {
         const clip = clipById.get(s.clip_id);
-        if (!clip) continue;
-        // Map schema transition names back to runtime names.
+        if (!clip) return;
         const t = s.transition || { type: 'cut', duration: 0 };
         let rt = (t.type || 'cut').toLowerCase();
         if (rt === 'xfade') rt = 'crossfade';
@@ -633,21 +641,31 @@ function deserialize(doc, projectId) {
         const sIn  = +s.source_in  || 0;
         const sOut = Math.max(sIn + 0.05, +s.source_out || 0);
         const dur  = sOut - sIn;
+        // Track placement: prefer the persisted track, fall back to the
+        // segment's array index for legacy docs (so opening an old project
+        // produces the multi-row layout the user now expects).
+        const track       = s.track != null ? Math.max(0, +s.track) : (isLegacy ? idx : 0);
+        const timelineIn  = s.timeline_in != null ? Math.max(0, +s.timeline_in) : (isLegacy ? 0 : cursor);
         const seg = {
           id: s.id, filename: clip.path, kind: clip.kind || 'video',
           url: pid ? ('/projects/' + encodeURIComponent(pid) + '/files/' + encodeURIComponent(clip.path)) : null,
           sourceIn: sIn, sourceOut: sOut,
-          timelineIn: cursor, timelineOut: cursor + dur,
+          track,
+          timelineIn,
+          timelineOut: timelineIn + dur,
           transition: { type: rt, duration: +t.duration || 0 },
           _duration: clip.duration || dur,
         };
         out.push(seg);
-        cursor = seg.timelineOut;
-        const overlap = (rt === 'crossfade' || rt === 'xfade' || rt === 'fade'
-                       || rt === 'fade_to_black' || rt === 'dip-to-black')
-          ? Math.max(0, +t.duration || 0) : 0;
-        cursor -= overlap;
-      }
+        // cursor advance only matters for the (now-legacy) chained branch.
+        if (!isLegacy) {
+          cursor = seg.timelineOut;
+          const overlap = (rt === 'crossfade' || rt === 'xfade' || rt === 'fade'
+                         || rt === 'fade_to_black' || rt === 'dip-to-black')
+            ? Math.max(0, +t.duration || 0) : 0;
+          cursor -= overlap;
+        }
+      });
       return out;
     })(),
     video: (() => {
