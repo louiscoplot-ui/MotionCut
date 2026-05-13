@@ -13,6 +13,9 @@
   // ---------- State ----------
   /** @type {{filename:string,url:string,kind:string,localUrl?:string,name?:string,duration?:number}[]} */
   const uploadedFiles = [];
+  /** Music track uploaded via the Options panel — separate from uploadedFiles
+   *  because it never appears in the file grid, just in the music chip. */
+  let audioTrack = null;     // {filename, url, kind:'audio', name}
   let currentJobId = null;
   let pollTimer = null;
   let renderStartedAt = 0;
@@ -229,7 +232,15 @@
       style:     selectedRadio('style')    || 'real_estate',
       duration:  (selectedRadio('duration') || null),
       format:    selectedRadio('format')   || '16:9',
-      music:     selectedRadio('music')    || 'auto',
+      music:     selectedRadio('music')    || 'none',
+      // Sprint 2 — visual options. Defaults match the previous behaviour
+      // (natural grade, no vignette / grain / letterbox) so users who
+      // never open the Options panel get exactly what they got before.
+      music_filename: audioTrack ? audioTrack.filename : null,
+      color_grade:    ($('color-grade')?.value || 'natural'),
+      vignette:       !!$('opt-vignette')?.checked,
+      film_grain:     !!$('opt-grain')?.checked,
+      letterbox:      !!$('opt-letterbox')?.checked,
     };
     if (body.duration === '' || body.duration === 'auto') body.duration = null;
     else if (body.duration) body.duration = parseInt(body.duration, 10);
@@ -417,9 +428,86 @@
     on($('btn-regen'),        'click', regenerate);
     on($('btn-change-style'), 'click', changeStyle);
 
+    // -------- Music upload wiring (Sprint 2) --------
+    // Radio toggles between "None" and "Upload track"; the file input
+    // slides in when "Upload track" is selected. Selecting None clears
+    // any previously-uploaded audio.
+    document.querySelectorAll('.opt-pills[data-group="music"] input').forEach(rad => {
+      rad.addEventListener('change', () => {
+        const wrap = $('music-upload');
+        const want = rad.value === 'upload';
+        if (want && wrap && wrap.hidden) {
+          wrap.hidden = false;
+          if (G) G.fromTo(wrap, {height:0, opacity:0}, {height:'auto', opacity:1, duration:0.25, ease:'power2.out',
+            onComplete: () => { wrap.style.height = ''; }
+          });
+        } else if (!want && wrap && !wrap.hidden) {
+          if (G) G.to(wrap, {height:0, opacity:0, duration:0.2, ease:'power2.in',
+            onComplete: () => { wrap.hidden = true; wrap.style.height=''; wrap.style.opacity=''; }
+          });
+          else wrap.hidden = true;
+          // Clearing the picker — also wipe the staged file.
+          audioTrack = null;
+          renderMusicChip();
+        }
+      });
+    });
+    on($('music-pick'), 'click', () => $('music-input')?.click());
+    on($('music-input'), 'change', async () => {
+      const inp = $('music-input');
+      const file = inp?.files?.[0];
+      inp.value = '';   // allow re-picking same file later
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('kind', 'audio');
+      fd.append('project', 'default');
+      try {
+        const r = await fetch('/api/upload', {method:'POST', body: fd});
+        const txt = await r.text();
+        let d; try { d = JSON.parse(txt); } catch { throw new Error('non-JSON: '+txt.slice(0,200)); }
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        audioTrack = { filename: d.filename, url: d.url, kind: 'audio', name: file.name };
+        renderMusicChip();
+        toast(`Music track ready: ${file.name}`, {kind:'success'});
+      } catch (e) {
+        console.warn('[music]', e);
+        toast(`Music upload failed: ${e.message}`, {kind:'error', duration:5000});
+      }
+    });
+    on($('music-clear'), 'click', () => {
+      audioTrack = null;
+      renderMusicChip();
+    });
+
+    // -------- Letterbox visibility tied to format --------
+    // Letterbox bars only make sense on 16:9 — hide the toggle otherwise
+    // (also matches the backend, which silently drops the flag on non-16:9).
+    const syncLetterboxVisibility = () => {
+      const wrap = $('opt-letterbox-wrap');
+      const f = selectedRadio('format');
+      if (!wrap) return;
+      const show = (f === '16:9');
+      wrap.style.display = show ? '' : 'none';
+      if (!show && $('opt-letterbox')) $('opt-letterbox').checked = false;
+    };
+    document.querySelectorAll('.opt-pills[data-group="format"] input').forEach(rad => {
+      rad.addEventListener('change', syncLetterboxVisibility);
+    });
+    syncLetterboxVisibility();
+
     // Initial paint
     renderFileGrid();
     refreshGenerateEnabled();
+  }
+
+  // ---------- Music chip render ----------
+  function renderMusicChip() {
+    const chip = $('music-chosen');
+    if (!chip) return;
+    if (!audioTrack) { chip.hidden = true; return; }
+    chip.hidden = false;
+    if ($('music-name')) $('music-name').textContent = audioTrack.name || audioTrack.filename;
   }
 
   if (document.readyState === 'loading') {

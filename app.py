@@ -401,6 +401,14 @@ def upload():
         return jsonify({"error": "empty filename"}), 400
 
     ext = Path(f.filename).suffix.lower()
+    # HEIC needs pillow-heif which isn't a stock dependency — explicit
+    # 415 with a clear message so the user knows to convert/install
+    # instead of silent-failing.
+    if ext in (".heic", ".heif"):
+        return jsonify({
+            "error": "HEIC/HEIF not supported — install pillow-heif on the server or "
+                     "convert to JPG before uploading."
+        }), 415
     kind = request.form.get("kind", "auto")
     if kind == "auto":
         if ext in ALLOWED_VIDEO:
@@ -410,7 +418,7 @@ def upload():
         elif ext in ALLOWED_AUDIO:
             kind = "audio"
         else:
-            return jsonify({"error": f"unsupported extension {ext}"}), 400
+            return jsonify({"error": f"unsupported extension {ext}"}), 415
 
     allowed = {
         "video": ALLOWED_VIDEO,
@@ -418,7 +426,7 @@ def upload():
         "audio": ALLOWED_AUDIO,
     }[kind]
     if ext not in allowed:
-        return jsonify({"error": f"{ext} not allowed for {kind}"}), 400
+        return jsonify({"error": f"{ext} not allowed for {kind}"}), 415
 
     project = request.form.get("project") or "default"
     out_dir = project_dir(project)
@@ -1918,11 +1926,18 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
 # /api/generate — one-shot pipeline (upload → analyse → plan → render).
 # Replaces the manual editing flow. Reuses run_export_job + analysis helpers.
 # ----------------------------------------------------------------------------
-def run_pipeline(job_id, pid, filenames, style, duration, format_str, music):
+def run_pipeline(job_id, pid, filenames, style, duration, format_str,
+                 music_filename=None, color_grade="natural",
+                 vignette=False, film_grain=False, letterbox=False):
     """Single-thread pipeline driving the four UI steps the user sees:
        analyzing → planning → rendering → done. All state goes through
        set_job() so the existing job tracker / status endpoint stays the
-       single source of truth (no parallel dict)."""
+       single source of truth (no parallel dict).
+
+       music_filename / color_grade / vignette / film_grain / letterbox
+       are threaded into the payload dict passed to run_export_job, which
+       already supports every one of these (we're just exposing them
+       through the simplified UI)."""
     try:
         set_job(job_id, status="analyzing", progress=10, eta_seconds=60)
         # 1. Analyse every clip in parallel — _analyze_or_cached() handles
@@ -1995,22 +2010,45 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str, music):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}.mp4"
 
-        # 4. Hand off to the existing multi-clip FFmpeg pipeline. Same
+        # 4. Resolve music track (optional). audio_path stays None when no
+        # music chosen — run_export_job emits silent anullsrc in that case.
+        audio_path = None
+        if music_filename:
+            cand = pdir / safe_name(music_filename)
+            if cand.exists():
+                audio_path = cand
+            else:
+                print(f"[generate] music file {music_filename!r} not found in {pdir} — "
+                      f"falling back to silent audio", flush=True)
+
+        # 5. Hand off to the existing multi-clip FFmpeg pipeline. Same
         #    signature as /api/export uses; the function updates set_job()
         #    progress 0→99→100 and writes status="done" / "error" itself.
+        # Letterbox bars only make sense on a 16:9 canvas (cinematic look);
+        # silently drop the toggle on portrait/square so the UI can't accidentally
+        # produce a vertically-letterboxed reel.
+        effective_letterbox = bool(letterbox) and aspect == "16:9"
         payload = {
-            "layers":      [],
-            "colorGrade":  "natural",
-            "vignette":    False,
-            "filmGrain":   False,
-            "letterbox":   False,
-            "musicVolume": 0.0,
+            "layers":       [],
+            "colorGrade":   color_grade or "natural",
+            "vignette":     bool(vignette),
+            "filmGrain":    bool(film_grain),
+            "letterbox":    effective_letterbox,
+            # 0.85 puts the music slightly under the (silent) clip audio; user
+            # can tweak later if we ever add a slider.
+            "musicVolume":  0.85 if audio_path else 0.0,
+            "musicFadeIn":  bool(audio_path),
+            "musicFadeOut": bool(audio_path),
+            # Multi-clip mode in run_export_job replaces clip audio with the
+            # music track entirely (see comment in run_export_job). So mode
+            # is effectively "replace" regardless of this flag.
+            "musicMode":    "replace",
         }
         run_export_job(
             job_id, payload,
             src_video=segment_paths[0],     # ignored in multi-clip mode, but positional
             image_paths=[],
-            audio_path=None,
+            audio_path=audio_path,
             out_path=out_path,
             target_w=target_w,
             target_h=target_h,
@@ -2042,7 +2080,13 @@ def api_generate():
     style     = (data.get("style") or "real_estate").lower()
     duration  = data.get("duration")    # may be None for "Auto"
     fmt       = data.get("format") or "16:9"
-    music     = data.get("music") or "auto"
+    # Visual / music options (Sprint 2). All optional — defaults keep the
+    # existing minimal-payload behaviour for legacy callers.
+    music_filename = data.get("music_filename") or None
+    color_grade    = (data.get("color_grade") or "natural").lower()
+    vignette       = bool(data.get("vignette") or False)
+    film_grain     = bool(data.get("film_grain") or False)
+    letterbox      = bool(data.get("letterbox") or False)
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
@@ -2062,7 +2106,8 @@ def api_generate():
     set_job(job_id, status="queued", progress=0, eta_seconds=60)
     t = threading.Thread(
         target=run_pipeline,
-        args=(job_id, pid, filenames, style, duration, fmt, music),
+        args=(job_id, pid, filenames, style, duration, fmt, music_filename,
+              color_grade, vignette, film_grain, letterbox),
         daemon=True,
     )
     t.start()

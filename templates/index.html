@@ -84,9 +84,41 @@
         <div class="opt-group">
           <div class="opt-label">Music</div>
           <div class="opt-pills" data-group="music">
-            <label class="pill on"><input type="radio" name="music" value="auto" checked>Auto</label>
-            <label class="pill"><input type="radio" name="music" value="none">None</label>
+            <label class="pill on"><input type="radio" name="music" value="none" checked>None</label>
+            <label class="pill"><input type="radio" name="music" value="upload">Upload track</label>
           </div>
+          <div class="music-upload" id="music-upload" hidden>
+            <input type="file" id="music-input" accept=".mp3,.wav,.m4a,.aac,audio/*" hidden>
+            <button class="btn-secondary tight" type="button" id="music-pick">Choose audio file…</button>
+            <div class="music-chosen" id="music-chosen" hidden>
+              <span class="music-name" id="music-name"></span>
+              <button class="music-clear" type="button" id="music-clear" title="Remove">×</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="opt-group">
+          <div class="opt-label">Color grade</div>
+          <select class="opt-select" id="color-grade">
+            <option value="natural" selected>Natural</option>
+            <option value="cinematic">Cinematic</option>
+            <option value="teal_orange">Teal &amp; Orange</option>
+            <option value="moody_dark">Moody Dark</option>
+            <option value="bright_airy">Bright &amp; Airy</option>
+            <option value="bw">Black &amp; White</option>
+          </select>
+        </div>
+
+        <div class="opt-group opt-toggles">
+          <label class="check">
+            <input type="checkbox" id="opt-vignette"><span>Vignette</span>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="opt-grain"><span>Film grain</span>
+          </label>
+          <label class="check" id="opt-letterbox-wrap">
+            <input type="checkbox" id="opt-letterbox"><span>Letterbox bars</span>
+          </label>
         </div>
       </div>
     </section>

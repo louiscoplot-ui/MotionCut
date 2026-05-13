@@ -224,6 +224,63 @@ html, body {
   font-weight: 600;
 }
 
+/* Music upload row — appears under the music pills when "Upload track" is on */
+.music-upload {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 8px;
+}
+.btn-secondary.tight { padding: 8px 14px; font-size: 13px; }
+.music-chosen {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: rgba(76,201,123,0.10);
+  color: var(--fg);
+  font-size: 13px;
+}
+.music-chosen .music-name {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.music-clear {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--muted); font-size: 14px; line-height: 1;
+  padding: 0 4px;
+}
+.music-clear:hover { color: var(--danger); }
+
+/* Color grade select + checkbox toggles */
+.opt-select {
+  appearance: none;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 9px 32px 9px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  /* Tiny gold chevron */
+  background-image: linear-gradient(45deg, transparent 50%, var(--gold-2) 50%),
+                    linear-gradient(135deg, var(--gold-2) 50%, transparent 50%);
+  background-position: right 14px center, right 10px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.opt-select:hover, .opt-select:focus { border-color: var(--gold-2); outline: none; }
+.opt-toggles {
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  gap: 14px !important;
+}
+.check {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; cursor: pointer; user-select: none;
+  color: var(--muted);
+}
+.check input { width: 16px; height: 16px; accent-color: var(--gold-2); }
+.check:hover { color: var(--fg); }
+
 /* ============== ACTION ============== */
 .section-action {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
