@@ -1850,6 +1850,165 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
         set_job(job_id, status="error", error=str(e))
 
 
+# ----------------------------------------------------------------------------
+# /api/generate — one-shot pipeline (upload → analyse → plan → render).
+# Replaces the manual editing flow. Reuses run_export_job + analysis helpers.
+# ----------------------------------------------------------------------------
+def run_pipeline(job_id, pid, filenames, style, duration, format_str, music):
+    """Single-thread pipeline driving the four UI steps the user sees:
+       analyzing → planning → rendering → done. All state goes through
+       set_job() so the existing job tracker / status endpoint stays the
+       single source of truth (no parallel dict)."""
+    try:
+        set_job(job_id, status="analyzing", progress=10, eta_seconds=60)
+        # 1. Analyse every clip in parallel — _analyze_or_cached() handles
+        #    its own caching in project.motioncut.json, so repeat clicks
+        #    on the same file set are basically instant.
+        workers = min(4, max(1, len(filenames)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            analyses = list(ex.map(lambda fn: _analyze_or_cached(pid, fn), filenames))
+
+        set_job(job_id, status="planning", progress=40, eta_seconds=40)
+        # 2. Build the edit plan. If the smart planner raises (bad clip
+        #    metadata, weird input), fall back to a sequential cut.
+        import auto_planner
+        try:
+            edit_plan = auto_planner.generate_edit_plan(
+                analyses, style, duration, format_str
+            )
+        except Exception as plan_err:
+            print(f"[generate] smart planner failed ({plan_err!r}); "
+                  f"falling back to sequential", flush=True)
+            edit_plan = auto_planner.generate_sequential_fallback(
+                analyses, duration or 30, format_str
+            )
+
+        if not edit_plan.get("segments"):
+            raise ValueError("Edit plan has no segments — every clip failed analysis")
+
+        set_job(job_id, status="rendering", progress=60, eta_seconds=20)
+        # 3. Resolve file paths and target resolution.
+        pdir = project_dir(pid)
+        segment_paths = [pdir / safe_name(s["clipFilename"]) for s in edit_plan["segments"]]
+        # Skip segments whose underlying file disappeared (defensive — we
+        # already filtered analyses, but the file may have been deleted
+        # between analyse and render).
+        kept = [(p, s) for p, s in zip(segment_paths, edit_plan["segments"]) if p.exists()]
+        if not kept:
+            raise ValueError("All segment files vanished between plan and render")
+        segment_paths = [p for p, _ in kept]
+        segments     = [s for _, s in kept]
+        aspect = edit_plan.get("aspect", "16:9")
+        if aspect == "9:16":
+            target_w, target_h = 1080, 1920
+        elif aspect == "1:1":
+            target_w, target_h = 1080, 1080
+        else:
+            target_w, target_h = 1920, 1080
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}.mp4"
+
+        # 4. Hand off to the existing multi-clip FFmpeg pipeline. Same
+        #    signature as /api/export uses; the function updates set_job()
+        #    progress 0→99→100 and writes status="done" / "error" itself.
+        payload = {
+            "layers":      [],
+            "colorGrade":  "natural",
+            "vignette":    False,
+            "filmGrain":   False,
+            "letterbox":   False,
+            "musicVolume": 0.0,
+        }
+        run_export_job(
+            job_id, payload,
+            src_video=segment_paths[0],     # ignored in multi-clip mode, but positional
+            image_paths=[],
+            audio_path=None,
+            out_path=out_path,
+            target_w=target_w,
+            target_h=target_h,
+            duration=edit_plan["total_duration"],
+            segment_paths=segment_paths,
+            segments=segments,
+        )
+        # run_export_job sets status="done" + output + url on success. No
+        # need to repeat it here.
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[generate] pipeline failed for job {job_id}: {e!r}\n{tb}", flush=True)
+        set_job(
+            job_id,
+            status="error",
+            error_message=str(e),
+            trace=tb.splitlines()[-6:],
+        )
+
+
+@app.route("/api/generate", methods=["POST"])
+def api_generate():
+    """Kick off run_pipeline() in a daemon thread. Returns {job_id} immediately
+    so the client can poll /api/generate/<id>/status for progress."""
+    data = request.get_json(force=True, silent=True) or {}
+    pid       = (data.get("project") or "default").strip() or "default"
+    filenames = [str(f) for f in (data.get("filenames") or []) if f]
+    style     = (data.get("style") or "real_estate").lower()
+    duration  = data.get("duration")    # may be None for "Auto"
+    fmt       = data.get("format") or "16:9"
+    music     = data.get("music") or "auto"
+
+    if not filenames:
+        return jsonify({"error": "no filenames provided"}), 400
+    # Validate that at least one file actually exists on disk — saves a
+    # confusing 60s wait that ends in "all clips missing".
+    pdir = project_dir(pid)
+    missing = [fn for fn in filenames if not (pdir / safe_name(fn)).exists()]
+    if missing and len(missing) == len(filenames):
+        return jsonify({"error": f"none of the files exist on the server: {missing}"}), 404
+
+    try:
+        duration = int(duration) if duration not in (None, "", "auto", "Auto") else None
+    except Exception:
+        duration = None
+
+    job_id = uuid.uuid4().hex[:12]
+    set_job(job_id, status="queued", progress=0, eta_seconds=60)
+    t = threading.Thread(
+        target=run_pipeline,
+        args=(job_id, pid, filenames, style, duration, fmt, music),
+        daemon=True,
+    )
+    t.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/generate/<job_id>/status")
+def api_generate_status(job_id):
+    """Mirror of get_job() reshaped for the new UI's 4-step display.
+    Maps internal run_export_job statuses ("queued","running","done","error")
+    onto user-facing ones ("rendering","done","error") so the frontend
+    doesn't need to know about both worlds."""
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    raw_status = job.get("status") or "queued"
+    # run_export_job uses "running" once FFmpeg is invoked. From the
+    # user's perspective that's still the "rendering" step.
+    if raw_status in ("running", "queued"):
+        ui_status = "rendering" if job.get("progress", 0) >= 60 else raw_status
+    else:
+        ui_status = raw_status
+    out = {
+        "status":        ui_status,
+        "progress":      int(job.get("progress") or 0),
+        "eta_seconds":   int(job.get("eta_seconds") or 0),
+        "error_message": job.get("error_message") or job.get("error"),
+    }
+    if ui_status == "done" and job.get("output"):
+        out["output_url"] = f"/exports/{job['output']}"
+    return jsonify(out)
+
+
 @app.route("/api/export", methods=["POST"])
 def api_export():
     data = request.get_json(force=True, silent=True) or {}
