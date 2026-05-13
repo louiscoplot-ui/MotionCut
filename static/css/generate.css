@@ -415,6 +415,13 @@ html, body {
   background: #000;
   display: block;
 }
+.waveform {
+  display: block;
+  width: 100%; height: 64px;
+  margin-top: 12px;
+  border-radius: var(--r-1);
+  background: rgba(255,255,255,0.02);
+}
 .result-actions {
   display: flex; gap: 10px; flex-wrap: wrap;
   margin-top: 18px;

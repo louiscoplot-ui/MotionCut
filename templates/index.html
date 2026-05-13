@@ -145,6 +145,9 @@
     <section class="card section-progress" id="section-progress" hidden>
       <h2 class="progress-title" id="progress-title">Analysing your clips…</h2>
       <ol class="steps" id="steps">
+        <li class="step step-audio" data-step="audio" hidden>
+          <span class="dot"></span><span class="step-label">Analysing audio</span>
+        </li>
         <li class="step" data-step="analyzing">
           <span class="dot"></span><span class="step-label">Analysing clips</span>
         </li>
@@ -169,6 +172,7 @@
     <section class="card section-result" id="section-result" hidden>
       <h2 class="result-title">Your edit is ready</h2>
       <video id="result-video" controls playsinline preload="metadata"></video>
+      <canvas id="waveform-canvas" class="waveform" width="800" height="80" hidden></canvas>
       <div class="result-actions">
         <a id="btn-download" class="btn-primary" href="#" download>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -190,7 +194,7 @@
 
   <!-- GSAP (CDN) — used for section transitions -->
   <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
-  <!-- App logic -->
-  <script src="{{ url_for('static', filename='js/generate.js') }}?v={{ build_version }}"></script>
+  <!-- App logic — module so it can import the worker-bridge ES module -->
+  <script type="module" src="{{ url_for('static', filename='js/generate.js') }}?v={{ build_version }}"></script>
 </body>
 </html>

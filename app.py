@@ -2010,6 +2010,22 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         if not edit_plan.get("segments"):
             raise ValueError("Edit plan has no segments — every clip failed analysis")
 
+        # Sprint 4: if the client ran audio analysis and saved beat_anchors
+        # to project.motioncut.json, snap each segment's tail to the nearest
+        # beat. Skip silently if no doc / no beats — render continues
+        # un-snapped exactly like before.
+        try:
+            with _doc_lock(pid):
+                doc_for_beats = _read_doc(pid) or {}
+            beats = list((doc_for_beats.get("audio") or {}).get("beat_anchors") or [])
+            if beats and edit_plan["segments"]:
+                snapped = _snap_segments_to_beats(edit_plan["segments"], beats)
+                print(f"[generate] snapping {len(snapped)} segments to "
+                      f"{len(beats)} beats", flush=True)
+                edit_plan["segments"] = snapped
+        except Exception as snap_err:
+            print(f"[generate] beat snap skipped: {snap_err!r}", flush=True)
+
         set_job(job_id, status="rendering", progress=60, eta_seconds=20)
         # 3. Resolve file paths and target resolution.
         pdir = project_dir(pid)

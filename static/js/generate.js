@@ -2,6 +2,8 @@
 // Upload → choose style → click Generate → watch progress → download.
 // State is intentionally local-only: uploadedFiles[] in memory + the
 // server's job tracker via /api/generate/<id>/status.
+import { WorkerBridge } from './worker-bridge.js';
+
 (() => {
   'use strict';
 
@@ -22,6 +24,11 @@
   let currentJobId = null;
   let pollTimer = null;
   let renderStartedAt = 0;
+  /** Latest waveform (200 peak values, 0..1) and beats (s) from the audio worker.
+   *  null until the worker has produced something for the current audioTrack. */
+  let waveformData = null;
+  let detectedBeats = [];
+  let waveformRAF = 0;
 
   // ---------- Build-pulse auto-reload ----------
   // Mirrors the SSE auto-reload from the old editor: if the server's SHA
@@ -107,6 +114,7 @@
     const placeholder = {
       filename: file.name, kind, url: null,
       localUrl, name: file.name, _uploading: true, duration: null,
+      file,  // keep the File object for client-side analysis (Sprint 4 audio worker)
     };
     uploadedFiles.push(placeholder);
     renderFileGrid();
@@ -254,8 +262,24 @@
     hideSection('section-options');
     hideSection('section-action');
     showSection('section-progress');
-    setStep('analyzing');
-    setProgress(0, 60);
+    // Show the audio step in the progress list only when we have a track to
+    // analyse — keeps the UI honest for "music: none" runs.
+    const audioStep = document.querySelector('.step[data-step="audio"]');
+    if (audioStep) audioStep.hidden = !audioTrack;
+    if (audioTrack) {
+      setStep('audio');
+      setProgress(0, 65);
+      try {
+        await runAudioAnalysis();
+      } catch (e) {
+        // Failure here is non-fatal: we still want to render, just without
+        // beat-snap. The user shouldn't be blocked by an analysis hiccup.
+        console.warn('[audio analysis] failed, continuing without beats:', e);
+      }
+    } else {
+      setStep('analyzing');
+      setProgress(0, 60);
+    }
 
     let data;
     try {
@@ -317,6 +341,10 @@
       const took = ((Date.now() - renderStartedAt) / 1000).toFixed(1);
       toast(`Done in ${took}s.`, {kind:'success'});
       currentJobId = null;
+      if (waveformData && waveformData.length) {
+        drawWaveform();
+        startWaveformLoop();
+      }
     } else if (status === 'error') {
       cancelPolling();
       const msg = s.error_message || 'unknown error';
@@ -331,7 +359,10 @@
   }
 
   function setStep(name) {
-    const order = ['analyzing','planning','rendering','done'];
+    // Sprint 4: "audio" step prepended when an audioTrack is staged. The
+    // <li> is `hidden` in the markup when no track is present so we never
+    // expose a misleading 5-step run for music=None generates.
+    const order = ['audio','analyzing','planning','rendering','done'];
     const reached = order.indexOf(name);
     document.querySelectorAll('.step').forEach((el) => {
       const i = order.indexOf(el.dataset.step);
@@ -339,6 +370,7 @@
       el.classList.toggle('is-active', i === reached);
     });
     const titles = {
+      audio:      'Analysing audio…',
       analyzing:  'Analysing your clips…',
       planning:   'Building the edit plan…',
       rendering:  'Rendering the final video…',
@@ -359,17 +391,168 @@
   // ---------- Result actions ----------
   function regenerate() {
     if (currentJobId) return;
+    cancelWaveformLoop();
     // Same uploadedFiles, fresh job.
     hideSection('section-result');
     generateVideo();
   }
   function changeStyle() {
     if (currentJobId) return;
+    cancelWaveformLoop();
     // Keep uploadedFiles; return to the picker.
     hideSection('section-result');
     showSection('section-upload');
     showSection('section-options');
     showSection('section-action');
+  }
+
+  // ---------- Audio analysis (Sprint 4 — Web Worker) ----------
+  // Decodes the staged music track in a Worker, returns { beats, waveform }.
+  // Beats are persisted via /api/project/save so the FFmpeg pipeline can
+  // snap segment cuts to them (see _snap_segments_to_beats in app.py).
+  // Failure here is non-fatal — the caller catches and the render continues
+  // without beats.
+  async function runAudioAnalysis() {
+    if (!audioTrack) return;
+    // 1. Get the raw bytes for the staged track.
+    let bytes;
+    if (audioTrack.source === 'upload' && audioTrack.file) {
+      bytes = await audioTrack.file.arrayBuffer();
+    } else if (audioTrack.source === 'catalogue' && audioTrack.catalogueUrl) {
+      const r = await fetch(audioTrack.catalogueUrl);
+      if (!r.ok) throw new Error('catalogue fetch: HTTP ' + r.status);
+      bytes = await r.arrayBuffer();
+    } else {
+      return;
+    }
+    // 2. Spawn the Worker via the bridge.
+    const bridge = new WorkerBridge(
+      new URL('./workers/analysis.worker.js', import.meta.url).toString()
+    );
+    let beats = [];
+    try {
+      const onMsg = (m) => {
+        if (!m) return;
+        if (m.type === 'PROGRESS') setProgress(Math.min(99, m.pct || 0));
+        else if (m.type === 'WAVEFORM_READY') waveformData = m.waveform || null;
+      };
+      const off = bridge.on(onMsg);
+      // Try Worker-side decode first. Transferable hand-off: the ArrayBuffer
+      // is detached on the main thread so we can't reuse it after this point.
+      bridge.send('ANALYSE_AUDIO', { audioBuffer: bytes, sampleRate: 48000 }, [bytes]);
+      const first = await bridge.wait((m) => m.type === 'BEATS_READY');
+      if (first.fallback) {
+        // Worker couldn't decode (no AudioContext in its scope). Decode on
+        // main thread using the WebAudio API, then re-post raw PCM. The
+        // beat-detection loop still runs in the Worker, which is what
+        // matters for keeping the main thread responsive on long tracks.
+        console.info('[audio] worker decode unavailable, falling back to main-thread decode');
+        const refetched = audioTrack.source === 'upload' && audioTrack.file
+          ? await audioTrack.file.arrayBuffer()
+          : await (await fetch(audioTrack.catalogueUrl)).arrayBuffer();
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) {
+          console.warn('[audio] no AudioContext on main thread either; skipping beats');
+          off();
+          bridge.terminate();
+          return;
+        }
+        const ctx = new AC();
+        try {
+          const buf = await ctx.decodeAudioData(refetched.slice(0));
+          const pcm = buf.getChannelData(0);
+          // Transfer PCM buffer to Worker for the loop-heavy beat detection.
+          bridge.send('ANALYSE_PCM', { pcm, sampleRate: buf.sampleRate }, [pcm.buffer]);
+          const second = await bridge.wait((m) => m.type === 'BEATS_READY');
+          beats = second.beats || [];
+        } finally {
+          try { await ctx.close(); } catch (_) {}
+        }
+      } else {
+        beats = first.beats || [];
+      }
+      // Wait briefly for WAVEFORM_READY (may arrive after BEATS_READY).
+      if (!waveformData) {
+        try {
+          await bridge.wait((m) => m.type === 'WAVEFORM_READY', { timeout: 1500 });
+        } catch (_) { /* not fatal — the waveform canvas just stays hidden */ }
+      }
+      off();
+    } finally {
+      bridge.terminate();
+    }
+    detectedBeats = beats;
+    console.log(`[MC] Worker posted BEATS_READY, ${beats.length} beats found`);
+    if (beats.length) {
+      try { await saveBeatsToProject('default', beats); }
+      catch (e) { console.warn('[audio] saving beats failed:', e); }
+    }
+  }
+
+  /** Persist beat_anchors to project.motioncut.json. The server-side
+   *  /api/project/save validator requires a v1 minimal doc shape; build
+   *  the smallest one that passes. */
+  async function saveBeatsToProject(pid, beats) {
+    const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const document = {
+      schema:      'https://motioncut.dev/schemas/project/v1.json',
+      version:     1,
+      id:          pid,
+      name:        pid,
+      created_at:  now,
+      modified_at: now,
+      audio:       { beat_anchors: beats },
+    };
+    const r = await fetch('/api/project/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: pid, document }),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error('save HTTP ' + r.status + ': ' + t.slice(0, 200));
+    }
+  }
+
+  // ---------- Waveform canvas (Section E) ----------
+  function drawWaveform() {
+    const c = $('waveform-canvas');
+    if (!c || !waveformData || !waveformData.length) return;
+    c.hidden = false;
+    // Match canvas pixel buffer to displayed size for crisp rendering.
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = c.clientWidth || 800;
+    const cssH = c.clientHeight || 64;
+    if (c.width !== cssW * dpr || c.height !== cssH * dpr) {
+      c.width = cssW * dpr; c.height = cssH * dpr;
+    }
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    const n = waveformData.length;
+    const barW = c.width / n;
+    ctx.fillStyle = '#d4af37';
+    for (let i = 0; i < n; i++) {
+      const peak = Math.max(0, Math.min(1, waveformData[i]));
+      const h = Math.max(1, peak * c.height * 0.9);
+      const y = (c.height - h) / 2;
+      ctx.fillRect(i * barW, y, Math.max(1, barW - 1), h);
+    }
+    // Playhead line.
+    const vid = $('result-video');
+    if (vid && vid.duration && isFinite(vid.duration)) {
+      const x = (vid.currentTime / vid.duration) * c.width;
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillRect(x - 1, 0, 2, c.height);
+    }
+  }
+  function startWaveformLoop() {
+    if (!waveformData) return;
+    cancelWaveformLoop();
+    const tick = () => { drawWaveform(); waveformRAF = requestAnimationFrame(tick); };
+    waveformRAF = requestAnimationFrame(tick);
+  }
+  function cancelWaveformLoop() {
+    if (waveformRAF) { cancelAnimationFrame(waveformRAF); waveformRAF = 0; }
   }
 
   // ---------- Init ----------
@@ -490,7 +673,7 @@
         let d; try { d = JSON.parse(txt); } catch { throw new Error('non-JSON: '+txt.slice(0,200)); }
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         audioTrack = { filename: d.filename, url: d.url, kind: 'audio',
-                       name: file.name, source: 'upload' };
+                       name: file.name, source: 'upload', file };
         renderMusicChip();
         syncVolumeVisibility();
         toast(`Music track ready: ${file.name}`, {kind:'success'});
