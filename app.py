@@ -1059,16 +1059,41 @@ _HEAD_TAIL_TRIM = 0.5
 _BEAT_TOLERANCE = 0.4
 
 
+IMAGE_HOLD_DUR = 8.0   # synthetic "duration" we give still images so the
+                       # planner treats them like a short clip. Per-style
+                       # SEG_DUR will clamp the actual on-screen time.
+
 def _analyze_or_cached(pid, filename):
-    """Used by /api/auto-edit. Returns the cached analysis if present;
-    otherwise runs a full analysis and caches it. Always returns a dict
-    (with an `error` key if the file can't be analysed)."""
+    """Used by /api/auto-edit and /api/generate. Returns the cached analysis
+    if present; otherwise runs a full analysis and caches it. Always returns
+    a dict (with an `error` key if the file can't be analysed).
+
+    Image files (JPG / PNG / WEBP) get a synthetic analysis with
+    duration=IMAGE_HOLD_DUR so they slot into the planner alongside videos;
+    they're later pre-rendered to looped MP4s inside run_pipeline()."""
     cached = _get_cached_analysis(pid, filename)
     if cached:
         return {**cached, "filename": filename}
     src = project_dir(pid) / safe_name(filename)
     if not src.exists():
         return {"filename": filename, "error": "file not found"}
+    # Images bypass FFmpeg analysis — they have no temporal content.
+    if src.suffix.lower() in ALLOWED_IMAGE:
+        result = {
+            "duration":    IMAGE_HOLD_DUR,
+            "shot_score":  0.55,
+            "motion":      0.0,
+            "sharpness":   0.5,
+            "brightness":  0.5,
+            "audio_energy": 0.0,
+            "scene_cuts": [],
+            "has_face":   False,
+            "shot_type":  "unknown",
+            "kind":       "image",
+        }
+        result["filename"] = filename
+        _set_cached_analysis(pid, filename, result)
+        return result
     try:
         result = _analyze_clip_file(src)
         result["filename"] = filename
@@ -1076,6 +1101,45 @@ def _analyze_or_cached(pid, filename):
         return result
     except Exception as e:
         return {"filename": filename, "error": str(e)}
+
+
+def _image_to_video_cached(image_path, duration, target_w, target_h):
+    """Render a JPG/PNG into a short looped MP4 so the multi-clip pipeline
+    (which assumes video inputs) can treat it like any other segment.
+
+    Output is cached next to the source as .img_<stem>_<ms>_<wxh>.mp4 so
+    repeat generates with the same image + duration + resolution are free.
+    The file naming convention starts with a dot so the project file
+    listing endpoint hides it from the user (same pattern as .thumb_*)."""
+    pdir = image_path.parent
+    safe_dur_ms = int(round(float(duration) * 1000))
+    cache = pdir / f".img_{image_path.stem}_{safe_dur_ms}_{target_w}x{target_h}.mp4"
+    if cache.exists() and cache.stat().st_size > 0:
+        return cache
+    # Scale the still to cover the target canvas, pad to the exact size.
+    # yuv420p + libx264 so the output mixes cleanly with the real clips.
+    cmd = [
+        FFMPEG, "-y",
+        "-loop", "1",
+        "-t", f"{float(duration):.3f}",
+        "-i", str(image_path),
+        "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+               f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-t", f"{float(duration):.3f}",
+        "-r", "30",
+        str(cache),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60, check=True)
+    except Exception as e:
+        print(f"[image2video] failed for {image_path.name}: {e}", flush=True)
+        if cache.exists():
+            try: cache.unlink()
+            except Exception: pass
+        raise
+    return cache
 
 
 def _select_best_segment(clip):
@@ -1905,6 +1969,29 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str, music):
             target_w, target_h = 1080, 1080
         else:
             target_w, target_h = 1920, 1080
+        # 3b. Pre-render any image segments into short looped MP4s so the
+        # multi-clip FFmpeg pipeline (which assumes video inputs) can treat
+        # them like any other clip. Cached on disk, free on repeat runs.
+        for i, (p, seg) in enumerate(zip(segment_paths, segments)):
+            if p.suffix.lower() not in ALLOWED_IMAGE:
+                continue
+            dur = max(0.5, float(seg["sourceOut"]) - float(seg["sourceIn"]))
+            try:
+                looped = _image_to_video_cached(p, dur, target_w, target_h)
+            except Exception as e:
+                print(f"[generate] skipping image {p.name}: {e}", flush=True)
+                continue
+            segment_paths[i] = looped
+            # Rewrite the segment to reference the looped file at full range.
+            segments[i] = {**seg, "clipFilename": looped.name,
+                           "sourceIn": 0.0, "sourceOut": round(dur, 3)}
+        # Drop segments whose image conversion failed.
+        kept2 = [(p, s) for p, s in zip(segment_paths, segments)
+                 if p.exists() and p.stat().st_size > 0]
+        if not kept2:
+            raise ValueError("Every clip failed to render — nothing to assemble")
+        segment_paths = [p for p, _ in kept2]
+        segments     = [s for _, s in kept2]
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}.mp4"
 
