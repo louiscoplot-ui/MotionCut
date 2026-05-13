@@ -1644,10 +1644,12 @@ def build_segments_chain(segments, target_w, target_h, fps=SEGMENT_FPS):
     # 1) Normalize each segment input: rescale to the target canvas, lock fps,
     #    and reset PTS so xfade offsets are measured from each clip's own zero.
     #    Locking fps avoids xfade timing drift when sources have varying frame rates.
+    # Fill the canvas: scale UP to cover, then crop the excess. Better for
+    # drone footage (no letterbox bars) at the cost of clipping edges.
     for i, seg in enumerate(segments):
         parts.append(
-            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
             f"setsar=1,fps={fps},format=yuv420p,setpts=PTS-STARTPTS[s{i}v]"
         )
 
@@ -2324,7 +2326,16 @@ def api_generate():
     # Visual / music options (Sprint 2). All optional — defaults keep the
     # existing minimal-payload behaviour for legacy callers.
     music_filename = data.get("music_filename") or None
-    color_grade    = (data.get("color_grade") or "natural").lower()
+    # Default color grade is style-aware: cinematic styles get a warmer LUT,
+    # social/fast keep the source look. Caller can always override.
+    _style_grade = {
+        "real_estate": "cinematic",
+        "cinematic":   "cinematic",
+        "social":      "natural",
+        "fast":        "natural",
+    }
+    color_grade    = (data.get("color_grade")
+                      or _style_grade.get(style, "natural")).lower()
     vignette       = bool(data.get("vignette") or False)
     film_grain     = bool(data.get("film_grain") or False)
     letterbox      = bool(data.get("letterbox") or False)
