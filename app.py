@@ -346,7 +346,19 @@ def api_build_pulse():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"ok": True, "ffmpeg": ffmpeg_available()})
+    # upload_chunk_mb lets the frontend right-size its chunk POSTs to fit
+    # under whatever the deployment proxy allows. Set MOTIONCUT_CHUNK_MB on
+    # the server to match nginx client_max_body_size (4 MB stays below the
+    # 8 MB nginx default; raise it to reduce request count on big files).
+    try:
+        chunk_mb = max(1, int(os.environ.get("MOTIONCUT_CHUNK_MB", "4")))
+    except (TypeError, ValueError):
+        chunk_mb = 4
+    return jsonify({
+        "ok":              True,
+        "ffmpeg":          ffmpeg_available(),
+        "upload_chunk_mb": chunk_mb,
+    })
 
 
 @app.route("/api/thumbnail")

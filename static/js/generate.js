@@ -116,7 +116,10 @@ import { WorkerBridge } from './worker-bridge.js';
   // Files larger than this go through /api/upload/chunk to bypass nginx /
   // Cloudflare body-size limits (commonly 100 MB). Smaller files keep the
   // single-shot POST /api/upload path for minimal overhead.
-  const CHUNK_SIZE = 20 * 1024 * 1024;            // 20 MB per chunk
+  // CHUNK_SIZE is fetched from /api/health at boot so the server can tune
+  // it per deployment (MOTIONCUT_CHUNK_MB env var). Defaults to 4 MB,
+  // which sits under nginx's 8 MB client_max_body_size default.
+  let CHUNK_SIZE = 4 * 1024 * 1024;
   const SMALL_FILE_THRESHOLD = 50 * 1024 * 1024;  // 50 MB
 
   async function uploadOne(file) {
@@ -210,8 +213,9 @@ import { WorkerBridge } from './worker-bridge.js';
       try { data = JSON.parse(txt); }
       catch {
         if (r.status === 413) {
-          throw new Error('Chunk too large for the proxy. '
-            + 'Reduce CHUNK_SIZE in generate.js or raise client_max_body_size.');
+          const mb = (CHUNK_SIZE / 1024 / 1024).toFixed(1);
+          throw new Error(`Chunk too large — current chunk size: ${mb} MB. `
+            + 'Set MOTIONCUT_CHUNK_MB env var on the server to reduce it.');
         }
         throw new Error(`chunk ${i+1}/${total}: non-JSON HTTP ${r.status}`);
       }
@@ -916,9 +920,26 @@ import { WorkerBridge } from './worker-bridge.js';
   }
 
   // ---------- Init ----------
+  /** Pull deployment-tuned settings from the server. Currently just the
+   *  chunk size used by the chunked-upload path. Failure is non-fatal —
+   *  CHUNK_SIZE keeps its safe 4 MB default. */
+  async function loadServerConfig() {
+    try {
+      const r = await fetch('/api/health');
+      if (!r.ok) return;
+      const d = await r.json();
+      const mb = Math.max(1, Math.min(64, parseInt(d.upload_chunk_mb, 10) || 4));
+      CHUNK_SIZE = mb * 1024 * 1024;
+      console.log(`[MC] chunk size: ${mb} MB (from /api/health)`);
+    } catch (_) {
+      // Network blip at boot — keep the 4 MB fallback.
+    }
+  }
+
   function init() {
     console.log('%c[MC] generate build', 'color:#f0c040;font-weight:bold', '— upload → AI → download');
     startBuildPulse();
+    loadServerConfig();
 
     // Drag-drop on the dropzone (also handle window drops as a safety net).
     const dz = $('dropzone');
