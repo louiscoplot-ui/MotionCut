@@ -939,7 +939,25 @@ import { WorkerBridge } from './worker-bridge.js';
   function init() {
     console.log('%c[MC] generate build', 'color:#f0c040;font-weight:bold', '— upload → AI → download');
     startBuildPulse();
-    loadServerConfig();
+    // Install a window-level drag suppressor *before* anything async so the
+    // browser can't navigate to a dropped file during the /api/health
+    // round-trip. The real per-element handlers below take over once
+    // loadServerConfig() resolves.
+    const suppressNav = (e) => { e.preventDefault(); };
+    window.addEventListener('dragover', suppressNav);
+    window.addEventListener('drop',     suppressNav);
+
+    // Kick off the rest asynchronously so we can await loadServerConfig()
+    // before the chunk-size-sensitive code paths exist. CHUNK_SIZE already
+    // has a safe 4 MB default, so even if the await never resolves the
+    // upload path stays functional.
+    initAsync().catch((err) => {
+      console.warn('[MC] init failed:', err);
+    });
+  }
+
+  async function initAsync() {
+    await loadServerConfig();
 
     // Drag-drop on the dropzone (also handle window drops as a safety net).
     const dz = $('dropzone');
