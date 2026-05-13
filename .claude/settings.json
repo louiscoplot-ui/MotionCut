@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git fetch*)",
+      "Bash(git pull*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git stash*)",
+      "Bash(git checkout*)",
+      "Bash(git reset --hard origin/*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(wc:*)",
+      "Bash(stat:*)",
+      "Bash(diff:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(pgrep:*)",
+      "Bash(pkill:*)",
+      "Bash(chmod:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(rm /tmp/*)",
+      "Bash(python3 -c*)",
+      "Bash(python3 -m flask*)",
+      "Bash(node --check*)",
+      "Bash(node --input-type=module*)",
+      "Bash(ffmpeg:*)",
+      "Bash(ffprobe:*)",
+      "Bash(curl -s http://127.0.0.1:*)",
+      "Bash(curl -sI http://127.0.0.1:*)",
+      "Bash(curl -X POST http://127.0.0.1:*)",
+      "Bash(curl -s -X POST http://127.0.0.1:*)",
+      "Bash(curl -o /tmp/* *)",
+      "Bash(.claude/hooks/*)"
+    ]
+  }
+}
