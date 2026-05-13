@@ -20,8 +20,8 @@ Current Workers:
 
 ## Branch policy
 
-**Always work on `claude/motioncut-video-editor-nZFMP`.** Never push
-elsewhere. Repo lives at `louiscoplot-ui/motioncut` on GitHub.
+**Always work on `main`.** Never push elsewhere. Repo lives at
+`louiscoplot-ui/motioncut` on GitHub.
 
 ## Pipeline overview (`run_pipeline` in app.py)
 
@@ -106,7 +106,7 @@ The `/smoke` slash command runs this end-to-end and reports.
 2. `node --input-type=module --check < static/js/generate.js` for JS.
 3. Run `/smoke` to verify the pipeline still works.
 4. Commit with the body explaining the WHY (not WHAT).
-5. Push to `claude/motioncut-video-editor-nZFMP`.
+5. Push to `main`.
 6. Sub-agents: spawn `code-reviewer` for risky diffs.
 
 ## Available sub-agents (project-scoped)
