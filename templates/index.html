@@ -127,6 +127,29 @@
             <input type="checkbox" id="opt-letterbox"><span>Letterbox bars</span>
           </label>
         </div>
+
+        <div class="opt-group" id="captions-group" hidden>
+          <label class="check">
+            <input type="checkbox" id="opt-captions"><span>Auto-captions (AI)</span>
+          </label>
+          <div class="captions-config" id="captions-config" hidden>
+            <select class="opt-select" id="captions-lang">
+              <option value="auto" selected>Auto-detect language</option>
+              <option value="english">English</option>
+              <option value="french">French</option>
+              <option value="spanish">Spanish</option>
+              <option value="german">German</option>
+            </select>
+            <select class="opt-select" id="captions-style">
+              <option value="subtitles" selected>Subtitles (bottom)</option>
+              <option value="overlay">Overlay (top)</option>
+              <option value="bold_center">Bold Center</option>
+            </select>
+            <div class="captions-note muted small">
+              <span id="captions-cache-state">~75 MB first use · cached after</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -147,6 +170,9 @@
       <ol class="steps" id="steps">
         <li class="step step-audio" data-step="audio" hidden>
           <span class="dot"></span><span class="step-label">Analysing audio</span>
+        </li>
+        <li class="step step-captions" data-step="captions" hidden>
+          <span class="dot"></span><span class="step-label">Transcribing audio</span>
         </li>
         <li class="step" data-step="analyzing">
           <span class="dot"></span><span class="step-label">Analysing clips</span>

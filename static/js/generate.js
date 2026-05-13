@@ -29,6 +29,12 @@ import { WorkerBridge } from './worker-bridge.js';
   let waveformData = null;
   let detectedBeats = [];
   let waveformRAF = 0;
+  /** Whisper bridge — kept across generates so the loaded pipeline (and its
+   *  cached weights) survives "Generate again" without re-importing the
+   *  library. terminate() is only called when the page unloads. */
+  let whisperBridge = null;
+  let whisperWarm = false;
+  const CAPTIONS_CACHE_FLAG = 'mc:whisper-warm';
 
   // ---------- Build-pulse auto-reload ----------
   // Mirrors the SSE auto-reload from the old editor: if the server's SHA
@@ -60,16 +66,22 @@ import { WorkerBridge } from './worker-bridge.js';
 
   // ---------- Toast ----------
   function toast(msg, opts = {}) {
-    const host = $('toast-host'); if (!host) return;
+    const host = $('toast-host'); if (!host) return null;
     const el = document.createElement('div');
     el.className = 'toast' + (opts.kind ? ' toast-' + opts.kind : '');
     el.textContent = msg;
     host.appendChild(el);
     if (G) G.fromTo(el, {y:12, opacity:0}, {y:0, opacity:1, duration:0.25, ease:'power2.out'});
-    setTimeout(() => {
-      if (G) G.to(el, {y:-8, opacity:0, duration:0.25, ease:'power2.in', onComplete:() => el.remove()});
-      else el.remove();
-    }, opts.duration || 3200);
+    // Sticky toasts auto-dismiss only when the caller removes them — used
+    // for long-lived progress messages (e.g. model download).
+    if (!opts.sticky) {
+      setTimeout(() => {
+        if (!el.isConnected) return;
+        if (G) G.to(el, {y:-8, opacity:0, duration:0.25, ease:'power2.in', onComplete:() => el.remove()});
+        else el.remove();
+      }, opts.duration || 3200);
+    }
+    return el;
   }
 
   // ---------- Section transitions ----------
@@ -97,35 +109,36 @@ import { WorkerBridge } from './worker-bridge.js';
     return null;
   }
 
+  // Files larger than this go through /api/upload/chunk to bypass nginx /
+  // Cloudflare body-size limits (commonly 100 MB). Smaller files keep the
+  // single-shot POST /api/upload path for minimal overhead.
+  const CHUNK_SIZE = 20 * 1024 * 1024;            // 20 MB per chunk
+  const SMALL_FILE_THRESHOLD = 50 * 1024 * 1024;  // 50 MB
+
   async function uploadOne(file) {
     const kind = classifyKind(file.name);
     if (!kind) {
       toast(`Skipped ${file.name}: unsupported format`, {kind:'error'});
       return null;
     }
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('kind', kind);
-    fd.append('project', 'default');
-    // We render an optimistic thumbnail right away from the local File
-    // object — the upload happens in parallel and the meta swap is
-    // invisible to the user.
     const localUrl = URL.createObjectURL(file);
     const placeholder = {
       filename: file.name, kind, url: null,
       localUrl, name: file.name, _uploading: true, duration: null,
-      file,  // keep the File object for client-side analysis (Sprint 4 audio worker)
+      file,                            // kept for Sprint 4 audio worker
+      _progress: 0,                    // 0..100, painted as an overlay bar
+      _size: file.size,
     };
     uploadedFiles.push(placeholder);
     renderFileGrid();
     try {
-      const r = await fetch('/api/upload', { method:'POST', body: fd });
-      const txt = await r.text();
-      let data; try { data = JSON.parse(txt); } catch { throw new Error('non-JSON upload response: ' + txt.slice(0,200)); }
-      if (!r.ok) throw new Error(data.error || `upload failed (${r.status})`);
-      placeholder.filename = data.filename;
-      placeholder.url      = data.url;
+      const data = file.size < SMALL_FILE_THRESHOLD
+        ? await uploadDirect(file, kind, placeholder)
+        : await uploadChunked(file, kind, placeholder);
+      placeholder.filename   = data.filename;
+      placeholder.url        = data.url;
       placeholder._uploading = false;
+      placeholder._progress  = 100;
       // Lazy probe duration for videos so the thumbnail can show "0:12".
       if (kind === 'video') {
         fetch('/api/probe', {
@@ -139,13 +152,86 @@ import { WorkerBridge } from './worker-bridge.js';
       return placeholder;
     } catch (e) {
       console.warn('[upload]', e);
-      toast(`Upload failed: ${file.name} — ${e.message}`, {kind:'error'});
-      // Drop the placeholder so the grid doesn't lie.
+      toast(`Upload failed: ${file.name} — ${e.message}`, {kind:'error', duration:5000});
       const i = uploadedFiles.indexOf(placeholder);
       if (i >= 0) uploadedFiles.splice(i, 1);
       renderFileGrid();
       return null;
     }
+  }
+
+  async function uploadDirect(file, kind, placeholder) {
+    const fd = new FormData();
+    fd.append('file',    file);
+    fd.append('kind',    kind);
+    fd.append('project', 'default');
+    const r = await fetch('/api/upload', { method:'POST', body: fd });
+    const txt = await r.text();
+    let data;
+    try { data = JSON.parse(txt); }
+    catch {
+      // nginx 413 is HTML, not JSON — special-case it so the user sees a
+      // useful message instead of "non-JSON upload response".
+      if (r.status === 413) {
+        throw new Error('File too large for the proxy. '
+          + 'Server admin: set client_max_body_size 2048m in nginx.conf.');
+      }
+      throw new Error('non-JSON upload response: ' + txt.slice(0,200));
+    }
+    if (!r.ok) throw new Error(data.error || `upload failed (${r.status})`);
+    return data;
+  }
+
+  async function uploadChunked(file, kind, placeholder) {
+    // upload_id pattern enforced by /api/upload/chunk: 8-64 chars [A-Za-z0-9_-].
+    const uploadId = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()))
+      .replace(/-/g, '').slice(0, 24);
+    const total = Math.ceil(file.size / CHUNK_SIZE);
+    let last = null;
+    for (let i = 0; i < total; i++) {
+      const start = i * CHUNK_SIZE;
+      const end   = Math.min(file.size, start + CHUNK_SIZE);
+      const chunk = file.slice(start, end);
+      const fd = new FormData();
+      fd.append('uploadId',     uploadId);
+      fd.append('chunkIndex',   String(i));
+      fd.append('totalChunks',  String(total));
+      fd.append('filename',     file.name);
+      fd.append('kind',         kind);
+      fd.append('project',      'default');
+      fd.append('chunk',        chunk);
+      const r = await fetch('/api/upload/chunk', { method:'POST', body: fd });
+      const txt = await r.text();
+      let data;
+      try { data = JSON.parse(txt); }
+      catch {
+        if (r.status === 413) {
+          throw new Error('Chunk too large for the proxy. '
+            + 'Reduce CHUNK_SIZE in generate.js or raise client_max_body_size.');
+        }
+        throw new Error(`chunk ${i+1}/${total}: non-JSON HTTP ${r.status}`);
+      }
+      if (!r.ok) throw new Error(data.error || `chunk ${i+1}/${total} failed (${r.status})`);
+      last = data;
+      const pct = Math.round(((i + 1) / total) * 100);
+      updateUploadProgress(placeholder, pct);
+    }
+    if (!last || !last.filename) {
+      throw new Error('chunked upload finalised with no file metadata');
+    }
+    return last;
+  }
+
+  function updateUploadProgress(placeholder, pct) {
+    placeholder._progress = Math.max(0, Math.min(100, pct | 0));
+    // Re-render just the matching card's overlay rather than the whole grid
+    // for smoother feedback on large uploads.
+    const i = uploadedFiles.indexOf(placeholder);
+    if (i < 0) return;
+    const overlay = document.querySelector(`.file-card[data-i="${i}"] .thumb-uploading`);
+    if (overlay) overlay.textContent = `Uploading… ${placeholder._progress}%`;
+    const bar = document.querySelector(`.file-card[data-i="${i}"] .upload-bar > div`);
+    if (bar) bar.style.width = placeholder._progress + '%';
   }
 
   async function uploadMany(files) {
@@ -192,7 +278,11 @@ import { WorkerBridge } from './worker-bridge.js';
       const thumbSrc = f.localUrl || f.url || '';
       const isVid = f.kind === 'video';
       const dur = f.duration ? fmtDur(f.duration) : '';
-      const overlay = f._uploading ? '<div class="thumb-uploading">Uploading…</div>' : '';
+      const pct = Math.max(0, Math.min(100, f._progress | 0));
+      const overlay = f._uploading
+        ? `<div class="thumb-uploading">Uploading… ${pct}%</div>
+           <div class="upload-bar"><div style="width:${pct}%"></div></div>`
+        : '';
       const thumb = isVid
         ? `<video class="thumb" muted playsinline preload="metadata" src="${thumbSrc}"></video>`
         : `<img class="thumb" src="${thumbSrc}" alt="">`;
@@ -219,6 +309,7 @@ import { WorkerBridge } from './worker-bridge.js';
       });
     });
     refreshGenerateEnabled();
+    syncCaptionsGroupVisibility();
   }
 
   function escapeHTML(s) {
@@ -254,6 +345,9 @@ import { WorkerBridge } from './worker-bridge.js';
       vignette:       !!$('opt-vignette')?.checked,
       film_grain:     !!$('opt-grain')?.checked,
       letterbox:      !!$('opt-letterbox')?.checked,
+      // Caption text layers from the Whisper worker, computed below before
+      // the POST. Empty when the toggle is off or transcription failed.
+      layers:         [],
     };
     if (body.duration === '' || body.duration === 'auto') body.duration = null;
     else if (body.duration) body.duration = parseInt(body.duration, 10);
@@ -272,14 +366,32 @@ import { WorkerBridge } from './worker-bridge.js';
       try {
         await runAudioAnalysis();
       } catch (e) {
-        // Failure here is non-fatal: we still want to render, just without
-        // beat-snap. The user shouldn't be blocked by an analysis hiccup.
         console.warn('[audio analysis] failed, continuing without beats:', e);
       }
-    } else {
+    }
+
+    // Sprint 5: caption transcription, if enabled. Step is hidden when the
+    // toggle is off; non-fatal — returns [] on any error path.
+    let captionLayers = [];
+    const captionsOn = !!$('opt-captions')?.checked
+                      && uploadedFiles.some(f => f.kind === 'video');
+    const captionStep = document.querySelector('.step[data-step="captions"]');
+    if (captionStep) captionStep.hidden = !captionsOn;
+    if (captionsOn) {
+      setStep('captions');
+      setProgress(0, 90);
+      try {
+        captionLayers = await runCaptions();
+      } catch (e) {
+        console.warn('[captions] failed:', e);
+        captionLayers = [];
+      }
+    }
+    if (!audioTrack && !captionsOn) {
       setStep('analyzing');
       setProgress(0, 60);
     }
+    body.layers = captionLayers;
 
     let data;
     try {
@@ -362,7 +474,7 @@ import { WorkerBridge } from './worker-bridge.js';
     // Sprint 4: "audio" step prepended when an audioTrack is staged. The
     // <li> is `hidden` in the markup when no track is present so we never
     // expose a misleading 5-step run for music=None generates.
-    const order = ['audio','analyzing','planning','rendering','done'];
+    const order = ['audio','captions','analyzing','planning','rendering','done'];
     const reached = order.indexOf(name);
     document.querySelectorAll('.step').forEach((el) => {
       const i = order.indexOf(el.dataset.step);
@@ -371,6 +483,7 @@ import { WorkerBridge } from './worker-bridge.js';
     });
     const titles = {
       audio:      'Analysing audio…',
+      captions:   'Transcribing audio…',
       analyzing:  'Analysing your clips…',
       planning:   'Building the edit plan…',
       rendering:  'Rendering the final video…',
@@ -404,6 +517,180 @@ import { WorkerBridge } from './worker-bridge.js';
     showSection('section-upload');
     showSection('section-options');
     showSection('section-action');
+  }
+
+  // ---------- Captions / Whisper (Sprint 5 — Web Worker) ----------
+  // Returns an array of text layer objects ready to drop into the
+  // /api/generate payload's `layers` field. Empty on failure / disabled.
+  async function runCaptions() {
+    const enabled = !!$('opt-captions')?.checked;
+    if (!enabled) return [];
+    const videos = uploadedFiles.filter(f => !f._uploading && f.kind === 'video' && f.url);
+    if (!videos.length) return [];
+
+    const language = $('captions-lang')?.value || 'auto';
+    const styleId  = $('captions-style')?.value || 'subtitles';
+    let modelToast = null;
+
+    if (!whisperBridge) {
+      whisperBridge = new WorkerBridge(
+        new URL('./workers/whisper.worker.js', import.meta.url).toString()
+      );
+    }
+    // Subscribe to MODEL_PROGRESS so we can update the toast live.
+    const offProgress = whisperBridge.on((m) => {
+      if (!m) return;
+      if (m.type === 'MODEL_PROGRESS' && modelToast) {
+        modelToast.textContent = `Downloading caption model… ${m.pct || 0}%`;
+      } else if (m.type === 'TRANSCRIPTION_PROGRESS') {
+        setProgress(Math.min(99, 30 + (m.pct || 0) * 0.5));
+      }
+    });
+
+    try {
+      if (!whisperWarm) {
+        modelToast = toast('Downloading caption model (~75 MB)…',
+                           { kind: 'gold', duration: 600000, sticky: true });
+        whisperBridge.send('LOAD_MODEL', {});
+        await whisperBridge.wait((m) => m.type === 'MODEL_READY',
+                                 { timeout: 300000 });
+        whisperWarm = true;
+        try { localStorage.setItem(CAPTIONS_CACHE_FLAG, '1'); } catch (_) {}
+        if (modelToast && modelToast.remove) modelToast.remove();
+        updateCaptionsCacheLabel();
+      }
+
+      const allLayers = [];
+      let offsetSec = 0;
+      for (const v of videos) {
+        let segments = [];
+        try {
+          const pcm = await extractMono16k(v.url);
+          if (!pcm || !pcm.length) continue;
+          whisperBridge.send('TRANSCRIBE',
+            { pcm, sampleRate: 16000, language },
+            [pcm.buffer]);
+          const res = await whisperBridge.wait(
+            (m) => m.type === 'TRANSCRIPTION_READY',
+            { timeout: 120000 });
+          segments = (res && res.segments) || [];
+        } catch (e) {
+          console.warn('[captions] video failed:', v.filename, e);
+        }
+        for (const s of segments) {
+          const layer = toTextLayer(s, offsetSec, styleId);
+          if (layer) allLayers.push(layer);
+        }
+        // Cumulative offset: matches the brief's "video1=0, video2=dur1, ..."
+        // ordering. The final edit may trim or reorder clips so captions are
+        // approximate, not frame-aligned — see notes in the sprint summary.
+        const dur = v.duration || (await probeDuration(v.filename));
+        offsetSec += dur || 0;
+      }
+      return allLayers;
+    } catch (err) {
+      console.warn('[captions] failed, continuing without:', err);
+      toast('Caption transcription failed — generating without captions.',
+            { kind: 'error', duration: 5000 });
+      return [];
+    } finally {
+      offProgress();
+      if (modelToast && modelToast.remove) modelToast.remove();
+    }
+  }
+
+  /** Map a Whisper segment to a drawtext layer object accepted by
+   *  build_filter_complex (canvasW/H + x/y/fontSize). */
+  function toTextLayer(seg, offset, styleId) {
+    const text = (seg.text || '').trim();
+    if (!text) return null;
+    const canvasW = 1920, canvasH = 1080;
+    const start = Math.max(0, (seg.start || 0) + offset);
+    const end   = Math.max(start + 0.4, (seg.end || start + 2) + offset);
+    const base = {
+      type: 'text',
+      text,
+      color: '#ffffff',
+      animation: 'fade',
+      canvasW, canvasH,
+      start: +start.toFixed(3),
+      end:   +end.toFixed(3),
+    };
+    if (styleId === 'overlay') {
+      return { ...base, x: canvasW * 0.5 - text.length * 12,
+               y: canvasH * 0.08, fontSize: 42, animation: 'reveal' };
+    }
+    if (styleId === 'bold_center') {
+      return { ...base, x: canvasW * 0.5 - text.length * 20,
+               y: canvasH * 0.46, fontSize: 72, animation: 'cinematic' };
+    }
+    // "subtitles" — bottom-center, the safe default.
+    return { ...base, x: Math.max(20, canvasW * 0.5 - text.length * 12),
+             y: canvasH * 0.84, fontSize: 42, animation: 'fade' };
+  }
+
+  /** Fetch a remote video, decode it via AudioContext, resample to 16 kHz
+   *  mono — Whisper's required input shape. Returns Float32Array or null. */
+  async function extractMono16k(url) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('fetch video: HTTP ' + r.status);
+    const buf = await r.arrayBuffer();
+    const ctx = new AC();
+    let decoded;
+    try {
+      decoded = await ctx.decodeAudioData(buf.slice(0));
+    } catch (e) {
+      // The mp4 may have no audio track, or a codec the browser can't decode.
+      try { await ctx.close(); } catch (_) {}
+      console.warn('[captions] decodeAudioData failed for', url, e);
+      return null;
+    }
+    try { await ctx.close(); } catch (_) {}
+    // Resample to 16 kHz mono via an offline graph.
+    const targetSr = 16000;
+    const offline = new OfflineAudioContext(
+      1, Math.ceil(decoded.duration * targetSr), targetSr);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offline.destination);
+    src.start(0);
+    const out = await offline.startRendering();
+    return out.getChannelData(0);
+  }
+
+  async function probeDuration(filename) {
+    try {
+      const r = await fetch('/api/probe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: 'default', filename }),
+      });
+      if (!r.ok) return 0;
+      const d = await r.json();
+      return d.duration || 0;
+    } catch (_) { return 0; }
+  }
+
+  function updateCaptionsCacheLabel() {
+    const el = $('captions-cache-state');
+    if (!el) return;
+    let cached = false;
+    try { cached = localStorage.getItem(CAPTIONS_CACHE_FLAG) === '1'; } catch (_) {}
+    if (cached) {
+      el.textContent = '✓ Model cached locally';
+      el.classList.add('is-cached');
+    } else {
+      el.textContent = '~75 MB first use · cached after';
+      el.classList.remove('is-cached');
+    }
+  }
+
+  function syncCaptionsGroupVisibility() {
+    const grp = $('captions-group');
+    if (!grp) return;
+    const hasVideo = uploadedFiles.some(f => f.kind === 'video' && !f._uploading);
+    grp.hidden = !hasVideo;
   }
 
   // ---------- Audio analysis (Sprint 4 — Web Worker) ----------
@@ -729,9 +1016,24 @@ import { WorkerBridge } from './worker-bridge.js';
     });
     syncLetterboxVisibility();
 
+    // -------- Captions toggle (Sprint 5) --------
+    // Show/hide the language+style selects under the toggle, and update
+    // the cache-state label based on localStorage (set after a successful
+    // model load in runCaptions()).
+    try {
+      whisperWarm = localStorage.getItem(CAPTIONS_CACHE_FLAG) === '1';
+    } catch (_) {}
+    updateCaptionsCacheLabel();
+    on($('opt-captions'), 'change', () => {
+      const cfg = $('captions-config');
+      const on  = $('opt-captions').checked;
+      if (cfg) cfg.hidden = !on;
+    });
+
     // Initial paint
     renderFileGrid();
     refreshGenerateEnabled();
+    syncCaptionsGroupVisibility();
   }
 
   // ---------- Music chip render ----------

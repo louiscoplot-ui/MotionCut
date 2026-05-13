@@ -1973,7 +1973,8 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
 def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                  music_filename=None, color_grade="natural",
                  vignette=False, film_grain=False, letterbox=False,
-                 music_volume=0.85, music_catalogue_url=None):
+                 music_volume=0.85, music_catalogue_url=None,
+                 layers=None):
     """Single-thread pipeline driving the four UI steps the user sees:
        analyzing → planning → rendering → done. All state goes through
        set_job() so the existing job tracker / status endpoint stays the
@@ -2106,7 +2107,10 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         # produce a vertically-letterboxed reel.
         effective_letterbox = bool(letterbox) and aspect == "16:9"
         payload = {
-            "layers":       [],
+            # Sprint 5: client-supplied text layers (Whisper captions). The
+            # FFmpeg multi-clip pipeline maps these via drawtext in
+            # build_filter_complex() with no further processing here.
+            "layers":       list(layers or []),
             "colorGrade":   color_grade or "natural",
             "vignette":     bool(vignette),
             "filmGrain":    bool(film_grain),
@@ -2172,6 +2176,11 @@ def api_generate():
         music_volume = 0.85
     music_volume = max(0.0, min(1.0, music_volume))
     music_catalogue_url = data.get("music_catalogue_url") or None
+    # Sprint 5: caption text layers from the Whisper worker. Validated only
+    # lightly here — build_filter_complex() defends against missing fields.
+    layers = data.get("layers") or []
+    if not isinstance(layers, list):
+        layers = []
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
@@ -2193,7 +2202,7 @@ def api_generate():
         target=run_pipeline,
         args=(job_id, pid, filenames, style, duration, fmt, music_filename,
               color_grade, vignette, film_grain, letterbox,
-              music_volume, music_catalogue_url),
+              music_volume, music_catalogue_url, layers),
         daemon=True,
     )
     t.start()

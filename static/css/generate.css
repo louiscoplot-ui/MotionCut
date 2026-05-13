@@ -172,6 +172,15 @@ html, body {
   color: var(--gold-2);
   font-size: 11px; letter-spacing: 0.04em;
 }
+.upload-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  height: 3px; background: rgba(255,255,255,0.08);
+}
+.upload-bar > div {
+  height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--gold-2), var(--gold));
+  transition: width 0.15s ease-out;
+}
 
 .upload-status { margin-top: 12px; min-height: 16px; }
 
@@ -422,6 +431,14 @@ html, body {
   border-radius: var(--r-1);
   background: rgba(255,255,255,0.02);
 }
+
+.captions-config {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px; padding-left: 24px;
+}
+.captions-config .opt-select { max-width: 280px; }
+.captions-note { padding-top: 2px; }
+#captions-cache-state.is-cached { color: var(--success); }
 .result-actions {
   display: flex; gap: 10px; flex-wrap: wrap;
   margin-top: 18px;
