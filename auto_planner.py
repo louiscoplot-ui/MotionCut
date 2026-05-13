@@ -62,11 +62,19 @@ def generate_edit_plan(analyses, style, duration_target, format_str):
     # default safely when they're absent.
     if style == "real_estate":
         # Classic real-estate sequence: drone → exterior → interior → details.
+        # Sprint 6: when shot_type is "unknown" (the analyzer's default), use
+        # has_face as a secondary cue — faces almost never appear in
+        # drone/exterior frames, so a face-positive clip is much more likely
+        # to belong to the interior/detail half of the reel.
         order = {"drone": 0, "exterior": 1, "interior": 2, "detail": 3, "unknown": 4}
-        valid.sort(key=lambda c: (
-            order.get(c.get("shot_type", "unknown"), 4),
-            -float(c.get("shot_score", 0)),
-        ))
+        def _re_key(c):
+            shot = c.get("shot_type", "unknown")
+            primary = order.get(shot, 4)
+            # Faces push unknown clips down towards the interior bucket.
+            if shot == "unknown" and c.get("has_face"):
+                primary = 2.5
+            return (primary, -float(c.get("shot_score", 0)))
+        valid.sort(key=_re_key)
     elif style == "cinematic":
         # Long, high-scoring clips first → builds the slow opening.
         valid.sort(key=lambda c: (

@@ -1494,6 +1494,97 @@ SEGMENT_FPS = 30
 
 
 _DRAWTEXT_FONT_CACHE = None
+def _remap_captions_to_layers(caption_segments, edit_segments, style_id):
+    """Translate source-time caption segments into edit-timeline text layers.
+
+    Args
+    ----
+    caption_segments : [{clipFilename, sourceStart, sourceEnd, text}]
+        Whisper output tagged with the clip the audio came from.
+    edit_segments : [{clipFilename, sourceIn, sourceOut, transition}]
+        The planner's final ordering (after generate_edit_plan).
+    style_id : "subtitles" | "overlay" | "bold_center"
+        Mirrors the client-side selector.
+
+    The walk is single-pass: each edit segment can host multiple captions
+    that overlap its [sourceIn, sourceOut] window. The caption's edit-time
+    start is `edit_offset + (sourceStart - sourceIn)`, clamped so a caption
+    can't run past the segment boundary (it'd then drift over the next clip).
+    """
+    if not caption_segments or not edit_segments:
+        return []
+    canvas_w, canvas_h = 1920, 1080
+    if style_id == "overlay":
+        font_size, y, anim = 42, int(canvas_h * 0.08), "reveal"
+    elif style_id == "bold_center":
+        font_size, y, anim = 72, int(canvas_h * 0.46), "cinematic"
+    else:    # "subtitles"
+        font_size, y, anim = 42, int(canvas_h * 0.84), "fade"
+
+    layers = []
+    edit_offset = 0.0
+    for seg in edit_segments:
+        seg_file = seg.get("clipFilename")
+        seg_in   = float(seg.get("sourceIn", 0))
+        seg_out  = float(seg.get("sourceOut", seg_in))
+        seg_dur  = max(0.0, seg_out - seg_in)
+        if seg_dur <= 0:
+            continue
+        for cap in caption_segments:
+            if cap.get("clipFilename") != seg_file:
+                continue
+            cs = float(cap.get("sourceStart", 0))
+            ce = float(cap.get("sourceEnd", cs))
+            # Trim caption to the segment's source window.
+            overlap_in  = max(cs, seg_in)
+            overlap_out = min(ce, seg_out)
+            if overlap_out - overlap_in < 0.15:
+                continue
+            edit_start = edit_offset + (overlap_in  - seg_in)
+            edit_end   = edit_offset + (overlap_out - seg_in)
+            text = (cap.get("text") or "").strip()
+            if not text:
+                continue
+            # x is approximated centred per line; the actual centering is
+            # done by drawtext at render time (x clamp via the wrap loop in
+            # build_filter_complex). Pick a left margin that keeps two-line
+            # captions visually balanced on a 16:9 frame.
+            layers.append({
+                "type":      "text",
+                "text":      text,
+                "fontSize":  font_size,
+                "color":     "#ffffff",
+                "x":         int(canvas_w * 0.10),
+                "y":         y,
+                "start":     round(edit_start, 3),
+                "end":       round(edit_end, 3),
+                "animation": anim,
+                "canvasW":   canvas_w,
+                "canvasH":   canvas_h,
+            })
+        edit_offset += seg_dur
+    return layers
+
+
+def _wrap_text(text, max_chars=42):
+    """Word-wrap a caption to ~max_chars per line. drawtext has no native
+    wrap so the caller stacks N drawtexts vertically. Never breaks mid-word
+    — overflows the line if a single word is longer than max_chars."""
+    words = (text or "").split()
+    lines, current = [], ""
+    for word in words:
+        if not current:
+            current = word
+        elif len(current) + 1 + len(word) <= max_chars:
+            current = current + " " + word
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def _resolve_drawtext_font():
     """Return a usable fontfile path for drawtext, escaped for filter syntax,
     or None if no font is available (drawtext will then use its built-in default)."""
@@ -1681,13 +1772,34 @@ def build_filter_complex(payload, target_w, target_h, duration,
         )
         cur = "[lb]"
 
-    # 6) Text layers via drawtext
+    # 6) Text layers via drawtext.
+    # Captions can exceed the safe horizontal extent. drawtext lacks a native
+    # word-wrap, so we split the layer into N drawtexts stacked vertically.
+    # The split happens here, then the per-line block below renders each.
     text_layers = [l for l in layers if l.get("type") == "text"]
+    expanded_layers = []
+    for layer in text_layers:
+        raw_text = layer.get("text", "") or ""
+        font_size = max(12, int(layer.get("fontSize", 48)))
+        # max chars scales inversely with fontSize — calibrated to ~42 chars
+        # at fontSize=42 on a 1920-px canvas. Tighter for bold_center (72px).
+        max_chars = max(10, int(42 * 42 / font_size))
+        lines = _wrap_text(raw_text, max_chars=max_chars)
+        line_height = int(font_size * 1.3)
+        for line_idx, line_text in enumerate(lines):
+            expanded_layers.append({
+                **layer,
+                "text":     line_text,
+                "_y_off":   line_idx * line_height,
+                "_line_n":  len(lines),
+            })
+    text_layers = expanded_layers
+
     for i, layer in enumerate(text_layers):
         cw = max(1, layer.get("canvasW", target_w))
         ch = max(1, layer.get("canvasH", target_h))
         x = int(layer.get("x", 0) * target_w / cw)
-        y = int(layer.get("y", 0) * target_h / ch)
+        y = int(layer.get("y", 0) * target_h / ch) + int(layer.get("_y_off", 0) * target_w / cw)
         size = max(12, int(layer.get("fontSize", 48) * target_w / cw))
         color = layer.get("color", "#ffffff").lstrip("#")
         try:
@@ -1974,7 +2086,8 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                  music_filename=None, color_grade="natural",
                  vignette=False, film_grain=False, letterbox=False,
                  music_volume=0.85, music_catalogue_url=None,
-                 layers=None):
+                 layers=None, caption_segments=None,
+                 caption_style="subtitles", clip_metadata=None):
     """Single-thread pipeline driving the four UI steps the user sees:
        analyzing → planning → rendering → done. All state goes through
        set_job() so the existing job tracker / status endpoint stays the
@@ -1993,6 +2106,18 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         with ThreadPoolExecutor(max_workers=workers) as ex:
             analyses = list(ex.map(lambda fn: _analyze_or_cached(pid, fn), filenames))
 
+        # Sprint 6: overlay client-supplied per-clip metadata (has_face from
+        # MediaPipe Worker) onto the analyses dicts. The auto-planner uses
+        # the merged value when ordering for the "real_estate" style.
+        clip_meta = { (m.get("filename") or ""): m
+                      for m in (clip_metadata or []) if isinstance(m, dict) }
+        for a in analyses:
+            fn = a.get("filename")
+            if fn and fn in clip_meta:
+                cm = clip_meta[fn]
+                if "has_face" in cm:
+                    a["has_face"] = bool(cm["has_face"])
+
         set_job(job_id, status="planning", progress=40, eta_seconds=40)
         # 2. Build the edit plan. If the smart planner raises (bad clip
         #    metadata, weird input), fall back to a sequential cut.
@@ -2010,6 +2135,29 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
 
         if not edit_plan.get("segments"):
             raise ValueError("Edit plan has no segments — every clip failed analysis")
+
+        # Sprint 6: expose the final segment order in the job tracker so the
+        # client can introspect / debug. Stored as a lightweight list of
+        # dicts; the heavy clip paths stay server-side.
+        set_job(job_id, edit_plan=[dict(s) for s in edit_plan["segments"]])
+
+        # Sprint 6: remap source-time caption segments to edit-timeline text
+        # layers, walking the final segment order. A caption is included iff
+        # its [sourceStart, sourceEnd] overlaps the segment's
+        # [sourceIn, sourceOut] for the same clipFilename — anything trimmed
+        # out of the edit silently drops. Layers are appended to whatever
+        # the client already passed in via `layers`.
+        try:
+            caption_layers = _remap_captions_to_layers(
+                caption_segments or [], edit_plan["segments"],
+                caption_style or "subtitles",
+            )
+            if caption_layers:
+                print(f"[generate] remapped {len(caption_layers)} caption "
+                      f"line(s) to edit timeline", flush=True)
+                layers = list(layers or []) + caption_layers
+        except Exception as cap_err:
+            print(f"[generate] caption remap skipped: {cap_err!r}", flush=True)
 
         # Sprint 4: if the client ran audio analysis and saved beat_anchors
         # to project.motioncut.json, snap each segment's tail to the nearest
@@ -2181,6 +2329,16 @@ def api_generate():
     layers = data.get("layers") or []
     if not isinstance(layers, list):
         layers = []
+    # Sprint 6 — captions arrive as source-time segments tagged with their
+    # source clipFilename. Remapping to the edit timeline happens inside
+    # run_pipeline once the plan is built.
+    caption_segments = data.get("caption_segments") or []
+    if not isinstance(caption_segments, list):
+        caption_segments = []
+    caption_style = (data.get("caption_style") or "subtitles").lower()
+    clip_metadata = data.get("clip_metadata") or []
+    if not isinstance(clip_metadata, list):
+        clip_metadata = []
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
@@ -2202,7 +2360,8 @@ def api_generate():
         target=run_pipeline,
         args=(job_id, pid, filenames, style, duration, fmt, music_filename,
               color_grade, vignette, film_grain, letterbox,
-              music_volume, music_catalogue_url, layers),
+              music_volume, music_catalogue_url, layers,
+              caption_segments, caption_style, clip_metadata),
         daemon=True,
     )
     t.start()
@@ -2230,6 +2389,9 @@ def api_generate_status(job_id):
         "progress":      int(job.get("progress") or 0),
         "eta_seconds":   int(job.get("eta_seconds") or 0),
         "error_message": job.get("error_message") or job.get("error"),
+        # Sprint 6: edit_plan is stored once the planner has run. Exposed so
+        # the client can debug or build caption alignment tools later.
+        "segments":      job.get("edit_plan") or [],
     }
     if ui_status == "done" and job.get("output"):
         out["output_url"] = f"/exports/{job['output']}"

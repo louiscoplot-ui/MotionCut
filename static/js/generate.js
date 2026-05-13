@@ -35,6 +35,10 @@ import { WorkerBridge } from './worker-bridge.js';
   let whisperBridge = null;
   let whisperWarm = false;
   const CAPTIONS_CACHE_FLAG = 'mc:whisper-warm';
+  /** MediaPipe face-detection bridge. Shared across the whole session for
+   *  the same reason as whisperBridge — the WASM + .tflite assets are
+   *  ~3-4 MB but the cost adds up across regenerates. */
+  let mediapipeBridge = null;
 
   // ---------- Build-pulse auto-reload ----------
   // Mirrors the SSE auto-reload from the old editor: if the server's SHA
@@ -345,9 +349,13 @@ import { WorkerBridge } from './worker-bridge.js';
       vignette:       !!$('opt-vignette')?.checked,
       film_grain:     !!$('opt-grain')?.checked,
       letterbox:      !!$('opt-letterbox')?.checked,
-      // Caption text layers from the Whisper worker, computed below before
-      // the POST. Empty when the toggle is off or transcription failed.
-      layers:         [],
+      // Sprint 6: captions are sent as source-time tagged segments and
+      // remapped to the edit timeline server-side once the planner has run.
+      // clip_metadata carries the MediaPipe has_face flag used by the
+      // real-estate ordering heuristic.
+      caption_segments: [],
+      caption_style:    'subtitles',
+      clip_metadata:    [],
     };
     if (body.duration === '' || body.duration === 'auto') body.duration = null;
     else if (body.duration) body.duration = parseInt(body.duration, 10);
@@ -370,9 +378,9 @@ import { WorkerBridge } from './worker-bridge.js';
       }
     }
 
-    // Sprint 5: caption transcription, if enabled. Step is hidden when the
-    // toggle is off; non-fatal — returns [] on any error path.
-    let captionLayers = [];
+    // Sprint 5+6: caption transcription, if enabled. Step is hidden when
+    // the toggle is off; non-fatal — returns empty segments on any error.
+    let captionResult = { segments: [], style: 'subtitles' };
     const captionsOn = !!$('opt-captions')?.checked
                       && uploadedFiles.some(f => f.kind === 'video');
     const captionStep = document.querySelector('.step[data-step="captions"]');
@@ -381,17 +389,27 @@ import { WorkerBridge } from './worker-bridge.js';
       setStep('captions');
       setProgress(0, 90);
       try {
-        captionLayers = await runCaptions();
+        captionResult = await runCaptions();
       } catch (e) {
         console.warn('[captions] failed:', e);
-        captionLayers = [];
       }
     }
-    if (!audioTrack && !captionsOn) {
-      setStep('analyzing');
-      setProgress(0, 60);
+
+    // Sprint 6: MediaPipe face detection on each video — silent, runs
+    // alongside the "Analyzing clips" step. Never blocks the render.
+    setStep('analyzing');
+    setProgress(0, captionsOn ? 50 : 60);
+    try {
+      await runFaceDetection();
+    } catch (e) {
+      console.warn('[face detection] failed:', e);
     }
-    body.layers = captionLayers;
+
+    body.caption_segments = captionResult.segments;
+    body.caption_style    = captionResult.style;
+    body.clip_metadata = uploadedFiles
+      .filter(f => !f._uploading && f.filename)
+      .map(f => ({ filename: f.filename, has_face: !!f.has_face }));
 
     let data;
     try {
@@ -519,17 +537,18 @@ import { WorkerBridge } from './worker-bridge.js';
     showSection('section-action');
   }
 
-  // ---------- Captions / Whisper (Sprint 5 — Web Worker) ----------
-  // Returns an array of text layer objects ready to drop into the
-  // /api/generate payload's `layers` field. Empty on failure / disabled.
+  // ---------- Captions / Whisper (Sprint 5+6 — Web Worker) ----------
+  // Returns { segments:[{clipFilename, sourceStart, sourceEnd, text}], style }
+  // — source-time tagged so the server can remap them to the edit timeline
+  // after the planner reorders clips. Empty segments on failure / disabled.
   async function runCaptions() {
     const enabled = !!$('opt-captions')?.checked;
-    if (!enabled) return [];
+    const styleId = $('captions-style')?.value || 'subtitles';
+    if (!enabled) return { segments: [], style: styleId };
     const videos = uploadedFiles.filter(f => !f._uploading && f.kind === 'video' && f.url);
-    if (!videos.length) return [];
+    if (!videos.length) return { segments: [], style: styleId };
 
     const language = $('captions-lang')?.value || 'auto';
-    const styleId  = $('captions-style')?.value || 'subtitles';
     let modelToast = null;
 
     if (!whisperBridge) {
@@ -537,7 +556,6 @@ import { WorkerBridge } from './worker-bridge.js';
         new URL('./workers/whisper.worker.js', import.meta.url).toString()
       );
     }
-    // Subscribe to MODEL_PROGRESS so we can update the toast live.
     const offProgress = whisperBridge.on((m) => {
       if (!m) return;
       if (m.type === 'MODEL_PROGRESS' && modelToast) {
@@ -550,7 +568,7 @@ import { WorkerBridge } from './worker-bridge.js';
     try {
       if (!whisperWarm) {
         modelToast = toast('Downloading caption model (~75 MB)…',
-                           { kind: 'gold', duration: 600000, sticky: true });
+                           { kind: 'gold', sticky: true });
         whisperBridge.send('LOAD_MODEL', {});
         await whisperBridge.wait((m) => m.type === 'MODEL_READY',
                                  { timeout: 300000 });
@@ -560,10 +578,9 @@ import { WorkerBridge } from './worker-bridge.js';
         updateCaptionsCacheLabel();
       }
 
-      const allLayers = [];
-      let offsetSec = 0;
+      const allSegments = [];
       for (const v of videos) {
-        let segments = [];
+        let segs = [];
         try {
           const pcm = await extractMono16k(v.url);
           if (!pcm || !pcm.length) continue;
@@ -573,60 +590,31 @@ import { WorkerBridge } from './worker-bridge.js';
           const res = await whisperBridge.wait(
             (m) => m.type === 'TRANSCRIPTION_READY',
             { timeout: 120000 });
-          segments = (res && res.segments) || [];
+          segs = (res && res.segments) || [];
         } catch (e) {
           console.warn('[captions] video failed:', v.filename, e);
         }
-        for (const s of segments) {
-          const layer = toTextLayer(s, offsetSec, styleId);
-          if (layer) allLayers.push(layer);
+        for (const s of segs) {
+          const text = (s.text || '').trim();
+          if (!text) continue;
+          allSegments.push({
+            clipFilename: v.filename,
+            sourceStart:  +Number(s.start || 0).toFixed(3),
+            sourceEnd:    +Number(s.end   || (s.start || 0) + 2).toFixed(3),
+            text,
+          });
         }
-        // Cumulative offset: matches the brief's "video1=0, video2=dur1, ..."
-        // ordering. The final edit may trim or reorder clips so captions are
-        // approximate, not frame-aligned — see notes in the sprint summary.
-        const dur = v.duration || (await probeDuration(v.filename));
-        offsetSec += dur || 0;
       }
-      return allLayers;
+      return { segments: allSegments, style: styleId };
     } catch (err) {
       console.warn('[captions] failed, continuing without:', err);
       toast('Caption transcription failed — generating without captions.',
             { kind: 'error', duration: 5000 });
-      return [];
+      return { segments: [], style: styleId };
     } finally {
       offProgress();
       if (modelToast && modelToast.remove) modelToast.remove();
     }
-  }
-
-  /** Map a Whisper segment to a drawtext layer object accepted by
-   *  build_filter_complex (canvasW/H + x/y/fontSize). */
-  function toTextLayer(seg, offset, styleId) {
-    const text = (seg.text || '').trim();
-    if (!text) return null;
-    const canvasW = 1920, canvasH = 1080;
-    const start = Math.max(0, (seg.start || 0) + offset);
-    const end   = Math.max(start + 0.4, (seg.end || start + 2) + offset);
-    const base = {
-      type: 'text',
-      text,
-      color: '#ffffff',
-      animation: 'fade',
-      canvasW, canvasH,
-      start: +start.toFixed(3),
-      end:   +end.toFixed(3),
-    };
-    if (styleId === 'overlay') {
-      return { ...base, x: canvasW * 0.5 - text.length * 12,
-               y: canvasH * 0.08, fontSize: 42, animation: 'reveal' };
-    }
-    if (styleId === 'bold_center') {
-      return { ...base, x: canvasW * 0.5 - text.length * 20,
-               y: canvasH * 0.46, fontSize: 72, animation: 'cinematic' };
-    }
-    // "subtitles" — bottom-center, the safe default.
-    return { ...base, x: Math.max(20, canvasW * 0.5 - text.length * 12),
-             y: canvasH * 0.84, fontSize: 42, animation: 'fade' };
   }
 
   /** Fetch a remote video, decode it via AudioContext, resample to 16 kHz
@@ -670,6 +658,91 @@ import { WorkerBridge } from './worker-bridge.js';
       const d = await r.json();
       return d.duration || 0;
     } catch (_) { return 0; }
+  }
+
+  // ---------- Face detection (Sprint 6 — MediaPipe Worker) ----------
+  // Extracts 3 frames per video (at 25 / 50 / 75 % of duration), runs them
+  // through MediaPipe FaceDetection in the Worker, and stores has_face on
+  // the matching uploadedFiles entry. Failures fall back to has_face:false
+  // so the planner just behaves like before.
+  async function runFaceDetection() {
+    const videos = uploadedFiles.filter(
+      f => !f._uploading && f.kind === 'video' && f.url && f.file);
+    if (!videos.length) return;
+    if (!mediapipeBridge) {
+      mediapipeBridge = new WorkerBridge(
+        new URL('./workers/mediapipe.worker.js', import.meta.url).toString()
+      );
+    }
+    for (const v of videos) {
+      if (v.has_face !== undefined) continue;  // already analysed
+      try {
+        const frames = await extractFrames(v.file, 3);
+        if (!frames.length) { v.has_face = false; continue; }
+        mediapipeBridge.send('DETECT_FACES',
+          { frames, width: frames[0].width, height: frames[0].height },
+          frames);  // transfer ImageBitmaps zero-copy
+        const res = await mediapipeBridge.wait(
+          (m) => m.type === 'FACE_RESULT', { timeout: 30000 });
+        v.has_face = !!(res && res.has_face);
+        if (res && res.fallback) {
+          console.info('[mediapipe] fallback for', v.filename);
+        }
+      } catch (e) {
+        console.warn('[mediapipe] failed for', v.filename, e);
+        v.has_face = false;
+      }
+    }
+  }
+
+  /** Decode `count` frames from a File via a hidden <video>, draw each to
+   *  an OffscreenCanvas, and return an array of ImageBitmaps. The bitmaps
+   *  are Transferable — the caller can hand them to a Worker zero-copy. */
+  async function extractFrames(file, count) {
+    const url = URL.createObjectURL(file);
+    try {
+      const vid = document.createElement('video');
+      vid.preload = 'auto';
+      vid.muted = true;
+      vid.playsInline = true;
+      vid.src = url;
+      await new Promise((resolve, reject) => {
+        vid.addEventListener('loadedmetadata', resolve, { once: true });
+        vid.addEventListener('error', () => reject(new Error('video load failed')), { once: true });
+      });
+      const dur = vid.duration;
+      if (!isFinite(dur) || dur <= 0.1) return [];
+      const w = Math.min(640, vid.videoWidth || 640);
+      const h = Math.round(w * (vid.videoHeight || 360) / (vid.videoWidth || 640));
+      const canvas = (typeof OffscreenCanvas !== 'undefined')
+        ? new OffscreenCanvas(w, h)
+        : Object.assign(document.createElement('canvas'), { width: w, height: h });
+      const ctx = canvas.getContext('2d');
+      const frames = [];
+      for (let i = 0; i < count; i++) {
+        const t = dur * ((i + 1) / (count + 1));   // 25 / 50 / 75 % for count=3
+        await new Promise((resolve, reject) => {
+          const onSeeked = () => { vid.removeEventListener('seeked', onSeeked); resolve(); };
+          vid.addEventListener('seeked', onSeeked, { once: true });
+          vid.addEventListener('error', () => reject(new Error('seek failed')), { once: true });
+          vid.currentTime = t;
+        });
+        ctx.drawImage(vid, 0, 0, w, h);
+        try {
+          const bm = (canvas.transferToImageBitmap)
+            ? canvas.transferToImageBitmap()
+            : await createImageBitmap(canvas);
+          frames.push(bm);
+        } catch (e) {
+          // OffscreenCanvas + transferToImageBitmap detaches the canvas
+          // contents; on fallback path we re-create the canvas next loop.
+          console.warn('[extractFrames] frame bitmap failed:', e);
+        }
+      }
+      return frames;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
 
   function updateCaptionsCacheLabel() {
