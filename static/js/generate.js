@@ -13,9 +13,12 @@
   // ---------- State ----------
   /** @type {{filename:string,url:string,kind:string,localUrl?:string,name?:string,duration?:number}[]} */
   const uploadedFiles = [];
-  /** Music track uploaded via the Options panel — separate from uploadedFiles
-   *  because it never appears in the file grid, just in the music chip. */
-  let audioTrack = null;     // {filename, url, kind:'audio', name}
+  /** Music track — either uploaded via the Options panel OR auto-picked
+   *  from /api/music/catalogue. Lives outside uploadedFiles because it
+   *  never appears in the file grid, just in the music chip. */
+  let audioTrack = null;     // {filename?, catalogueUrl?, name, source:'upload'|'catalogue'}
+  /** Cached catalogue from /api/music/catalogue — fetched lazily once. */
+  let musicCatalogue = null;
   let currentJobId = null;
   let pollTimer = null;
   let renderStartedAt = 0;
@@ -236,7 +239,9 @@
       // Sprint 2 — visual options. Defaults match the previous behaviour
       // (natural grade, no vignette / grain / letterbox) so users who
       // never open the Options panel get exactly what they got before.
-      music_filename: audioTrack ? audioTrack.filename : null,
+      music_filename:        (audioTrack && audioTrack.source === 'upload')    ? audioTrack.filename    : null,
+      music_catalogue_url:   (audioTrack && audioTrack.source === 'catalogue') ? audioTrack.catalogueUrl : null,
+      music_volume:          getMusicVolume(),
       color_grade:    ($('color-grade')?.value || 'natural'),
       vignette:       !!$('opt-vignette')?.checked,
       film_grain:     !!$('opt-grain')?.checked,
@@ -428,28 +433,45 @@
     on($('btn-regen'),        'click', regenerate);
     on($('btn-change-style'), 'click', changeStyle);
 
-    // -------- Music upload wiring (Sprint 2) --------
-    // Radio toggles between "None" and "Upload track"; the file input
-    // slides in when "Upload track" is selected. Selecting None clears
-    // any previously-uploaded audio.
+    // -------- Music wiring (Sprint 3: none / auto / upload) --------
+    // - "None"   : audioTrack = null, slider + picker hidden
+    // - "Auto"   : auto-pick catalogue track matching the current style
+    // - "Upload" : reveal the file picker; user uploads their own track
+    const musicUploadWrap = $('music-upload');
+    function showMusicUpload(show) {
+      if (!musicUploadWrap) return;
+      if (show && musicUploadWrap.hidden) {
+        musicUploadWrap.hidden = false;
+        if (G) G.fromTo(musicUploadWrap, {height:0, opacity:0},
+          {height:'auto', opacity:1, duration:0.25, ease:'power2.out',
+            onComplete: () => { musicUploadWrap.style.height = ''; }});
+      } else if (!show && !musicUploadWrap.hidden) {
+        if (G) G.to(musicUploadWrap, {height:0, opacity:0, duration:0.2, ease:'power2.in',
+          onComplete: () => { musicUploadWrap.hidden = true; musicUploadWrap.style.height=''; musicUploadWrap.style.opacity=''; }});
+        else musicUploadWrap.hidden = true;
+      }
+    }
     document.querySelectorAll('.opt-pills[data-group="music"] input').forEach(rad => {
-      rad.addEventListener('change', () => {
-        const wrap = $('music-upload');
-        const want = rad.value === 'upload';
-        if (want && wrap && wrap.hidden) {
-          wrap.hidden = false;
-          if (G) G.fromTo(wrap, {height:0, opacity:0}, {height:'auto', opacity:1, duration:0.25, ease:'power2.out',
-            onComplete: () => { wrap.style.height = ''; }
-          });
-        } else if (!want && wrap && !wrap.hidden) {
-          if (G) G.to(wrap, {height:0, opacity:0, duration:0.2, ease:'power2.in',
-            onComplete: () => { wrap.hidden = true; wrap.style.height=''; wrap.style.opacity=''; }
-          });
-          else wrap.hidden = true;
-          // Clearing the picker — also wipe the staged file.
+      rad.addEventListener('change', async () => {
+        const mode = rad.value;
+        if (mode === 'upload') {
+          showMusicUpload(true);
+          // If we previously had an auto-selected catalogue track, clear it
+          // so the chip shows the right state for "Upload".
+          if (audioTrack && audioTrack.source === 'catalogue') {
+            audioTrack = null;
+            renderMusicChip();
+          }
+        } else {
+          showMusicUpload(false);
+        }
+        if (mode === 'none') {
           audioTrack = null;
           renderMusicChip();
+        } else if (mode === 'auto') {
+          await autoPickCatalogueTrack();
         }
+        syncVolumeVisibility();
       });
     });
     on($('music-pick'), 'click', () => $('music-input')?.click());
@@ -467,8 +489,10 @@
         const txt = await r.text();
         let d; try { d = JSON.parse(txt); } catch { throw new Error('non-JSON: '+txt.slice(0,200)); }
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        audioTrack = { filename: d.filename, url: d.url, kind: 'audio', name: file.name };
+        audioTrack = { filename: d.filename, url: d.url, kind: 'audio',
+                       name: file.name, source: 'upload' };
         renderMusicChip();
+        syncVolumeVisibility();
         toast(`Music track ready: ${file.name}`, {kind:'success'});
       } catch (e) {
         console.warn('[music]', e);
@@ -478,6 +502,32 @@
     on($('music-clear'), 'click', () => {
       audioTrack = null;
       renderMusicChip();
+      syncVolumeVisibility();
+    });
+
+    // -------- Volume slider wiring --------
+    const volSlider = $('music-volume');
+    const volLabel  = $('music-volume-val');
+    function paintVolGradient() {
+      if (!volSlider) return;
+      volSlider.style.setProperty('--vol', (volSlider.value || 0) + '%');
+    }
+    on(volSlider, 'input', () => {
+      if (volLabel) volLabel.textContent = volSlider.value;
+      paintVolGradient();
+    });
+    paintVolGradient();
+
+    // -------- Auto music: re-pick on style change --------
+    // When user has chosen music = "Auto", changing the reel style should
+    // also swap the catalogue track to match the new style.
+    document.querySelectorAll('.opt-pills[data-group="style"] input').forEach(rad => {
+      rad.addEventListener('change', async () => {
+        if (selectedRadio('music') === 'auto') {
+          await autoPickCatalogueTrack();
+          syncVolumeVisibility();
+        }
+      });
     });
 
     // -------- Letterbox visibility tied to format --------
@@ -507,7 +557,62 @@
     if (!chip) return;
     if (!audioTrack) { chip.hidden = true; return; }
     chip.hidden = false;
-    if ($('music-name')) $('music-name').textContent = audioTrack.name || audioTrack.filename;
+    if ($('music-name')) {
+      const suffix = audioTrack.source === 'catalogue' ? ' (auto)' : '';
+      $('music-name').textContent = '🎵 ' + (audioTrack.name || audioTrack.filename) + suffix;
+    }
+  }
+
+  // ---------- Catalogue auto-pick ----------
+  async function fetchCatalogue() {
+    if (musicCatalogue) return musicCatalogue;
+    try {
+      const r = await fetch('/api/music/catalogue');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      musicCatalogue = Array.isArray(d.tracks) ? d.tracks : [];
+    } catch (e) {
+      console.warn('[catalogue]', e);
+      musicCatalogue = [];
+    }
+    return musicCatalogue;
+  }
+  async function autoPickCatalogueTrack() {
+    const tracks = await fetchCatalogue();
+    if (!tracks.length) {
+      toast('Music catalogue unavailable.', {kind:'error'});
+      audioTrack = null;
+      renderMusicChip();
+      return;
+    }
+    const style = selectedRadio('style') || 'real_estate';
+    const t = tracks.find(x => x.style === style) || tracks[0];
+    audioTrack = {
+      filename: null, catalogueUrl: t.url, kind: 'audio',
+      name: t.name, source: 'catalogue',
+    };
+    renderMusicChip();
+  }
+
+  // ---------- Volume helpers ----------
+  function getMusicVolume() {
+    const v = parseInt($('music-volume')?.value || '85', 10);
+    return Math.max(0, Math.min(100, isFinite(v) ? v : 85)) / 100;
+  }
+  function syncVolumeVisibility() {
+    const wrap = $('music-volume-wrap');
+    if (!wrap) return;
+    const show = !!audioTrack;
+    if (show && wrap.hidden) {
+      wrap.hidden = false;
+      if (G) G.fromTo(wrap, {height:0, opacity:0},
+        {height:'auto', opacity:1, duration:0.22, ease:'power2.out',
+          onComplete: () => { wrap.style.height = ''; }});
+    } else if (!show && !wrap.hidden) {
+      if (G) G.to(wrap, {height:0, opacity:0, duration:0.18, ease:'power2.in',
+        onComplete: () => { wrap.hidden = true; wrap.style.height=''; wrap.style.opacity=''; }});
+      else wrap.hidden = true;
+    }
   }
 
   if (document.readyState === 'loading') {

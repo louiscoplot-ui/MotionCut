@@ -85,6 +85,7 @@
           <div class="opt-label">Music</div>
           <div class="opt-pills" data-group="music">
             <label class="pill on"><input type="radio" name="music" value="none" checked>None</label>
+            <label class="pill"><input type="radio" name="music" value="auto">Auto</label>
             <label class="pill"><input type="radio" name="music" value="upload">Upload track</label>
           </div>
           <div class="music-upload" id="music-upload" hidden>
@@ -94,6 +95,12 @@
               <span class="music-name" id="music-name"></span>
               <button class="music-clear" type="button" id="music-clear" title="Remove">×</button>
             </div>
+          </div>
+          <div class="music-volume" id="music-volume-wrap" hidden>
+            <label class="music-volume-label" for="music-volume">
+              Volume — <span id="music-volume-val">85</span>%
+            </label>
+            <input type="range" min="0" max="100" value="85" id="music-volume">
           </div>
         </div>
 

@@ -24,6 +24,16 @@ try:
     _PIL_AVAILABLE = True
 except Exception:
     _PIL_AVAILABLE = False
+
+# pillow-heif registers HEIC/HEIF as Pillow-decodable formats. Optional —
+# if it's missing, the upload endpoint returns 415 with a clear message
+# instead of silently failing.
+try:
+    import pillow_heif  # noqa: F401
+    pillow_heif.register_heif_opener()
+    _HEIF_AVAILABLE = True
+except Exception:
+    _HEIF_AVAILABLE = False
 from flask import (
     Flask, request, jsonify, send_from_directory,
     render_template, Response, abort, url_for
@@ -401,19 +411,22 @@ def upload():
         return jsonify({"error": "empty filename"}), 400
 
     ext = Path(f.filename).suffix.lower()
-    # HEIC needs pillow-heif which isn't a stock dependency — explicit
-    # 415 with a clear message so the user knows to convert/install
-    # instead of silent-failing.
-    if ext in (".heic", ".heif"):
+    # HEIC/HEIF: try to transparently convert to JPG via Pillow (needs
+    # pillow-heif registered as a plugin). If Pillow + pillow-heif are
+    # absent, or the file is not decodable, fall back to a clear 415 so
+    # the user knows to convert client-side.
+    heic_convert = ext in (".heic", ".heif")
+    if heic_convert and not _PIL_AVAILABLE:
         return jsonify({
-            "error": "HEIC/HEIF not supported — install pillow-heif on the server or "
-                     "convert to JPG before uploading."
+            "error": "HEIC/HEIF not supported on this server — install Pillow + "
+                     "pillow-heif, or convert to JPG before uploading."
         }), 415
+
     kind = request.form.get("kind", "auto")
     if kind == "auto":
         if ext in ALLOWED_VIDEO:
             kind = "video"
-        elif ext in ALLOWED_IMAGE:
+        elif ext in ALLOWED_IMAGE or heic_convert:
             kind = "image"
         elif ext in ALLOWED_AUDIO:
             kind = "audio"
@@ -425,7 +438,9 @@ def upload():
         "image": ALLOWED_IMAGE,
         "audio": ALLOWED_AUDIO,
     }[kind]
-    if ext not in allowed:
+    # HEIC arrives with kind=image; its extension isn't in ALLOWED_IMAGE
+    # (we strip it after conversion) — let it through.
+    if ext not in allowed and not (heic_convert and kind == "image"):
         return jsonify({"error": f"{ext} not allowed for {kind}"}), 415
 
     project = request.form.get("project") or "default"
@@ -435,6 +450,35 @@ def upload():
     fname = f"{fid}_{safe_name(f.filename)}"
     out_path = out_dir / fname
     f.save(str(out_path))
+
+    # HEIC → JPG conversion. Pillow needs pillow-heif registered to decode
+    # HEIC; if that's missing, Image.open raises UnidentifiedImageError and
+    # we surface a clean 415. On success we rewrite out_path / fname to the
+    # .jpg so the rest of the pipeline never sees the original.
+    if heic_convert:
+        try:
+            from PIL import Image, UnidentifiedImageError
+            try:
+                with Image.open(out_path) as img:
+                    img = img.convert("RGB")
+                    new_name = Path(fname).with_suffix(".jpg").name
+                    new_path = out_dir / new_name
+                    img.save(str(new_path), "JPEG", quality=92)
+            except (UnidentifiedImageError, OSError) as decode_err:
+                out_path.unlink(missing_ok=True)
+                msg = ("HEIC decode failed — file is corrupt or not a real HEIC."
+                       if _HEIF_AVAILABLE
+                       else "HEIC decode failed — pillow-heif is not installed on "
+                            "the server, so this file can't be read. Convert to "
+                            "JPG locally and try again.")
+                return jsonify({"error": msg}), 415
+            out_path.unlink(missing_ok=True)
+            out_path = new_path
+            fname    = new_name
+        except Exception as e:
+            print(f"[upload] HEIC conversion failed for {f.filename!r}: {e!r}", flush=True)
+            out_path.unlink(missing_ok=True)
+            return jsonify({"error": f"HEIC conversion failed: {e}"}), 415
 
     # Skip the synchronous probe — it's the slowest step on large files and
     # blocks the parallel upload pipeline. The frontend calls /api/probe
@@ -1928,7 +1972,8 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
 # ----------------------------------------------------------------------------
 def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                  music_filename=None, color_grade="natural",
-                 vignette=False, film_grain=False, letterbox=False):
+                 vignette=False, film_grain=False, letterbox=False,
+                 music_volume=0.85, music_catalogue_url=None):
     """Single-thread pipeline driving the four UI steps the user sees:
        analyzing → planning → rendering → done. All state goes through
        set_job() so the existing job tracker / status endpoint stays the
@@ -2010,8 +2055,9 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}.mp4"
 
-        # 4. Resolve music track (optional). audio_path stays None when no
-        # music chosen — run_export_job emits silent anullsrc in that case.
+        # 4. Resolve music track (optional). Priority: uploaded file >
+        # catalogue URL > silence. audio_path stays None when nothing is
+        # chosen — run_export_job emits silent anullsrc in that case.
         audio_path = None
         if music_filename:
             cand = pdir / safe_name(music_filename)
@@ -2019,7 +2065,22 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                 audio_path = cand
             else:
                 print(f"[generate] music file {music_filename!r} not found in {pdir} — "
-                      f"falling back to silent audio", flush=True)
+                      f"falling back to catalogue/silence", flush=True)
+        if audio_path is None and music_catalogue_url:
+            # Catalogue tracks live under /static/audio/, served as plain
+            # static assets. Resolve to a local Path inside BASE_DIR; refuse
+            # anything outside that tree so a crafted URL can't escape.
+            rel = music_catalogue_url.lstrip("/")
+            cand = (BASE_DIR / rel).resolve()
+            try:
+                cand.relative_to((BASE_DIR / "static" / "audio").resolve())
+            except ValueError:
+                print(f"[generate] catalogue url {music_catalogue_url!r} outside static/audio — ignoring", flush=True)
+                cand = None
+            if cand and cand.exists():
+                audio_path = cand
+            else:
+                print(f"[generate] catalogue track {music_catalogue_url!r} not found — silent fallback", flush=True)
 
         # 5. Hand off to the existing multi-clip FFmpeg pipeline. Same
         #    signature as /api/export uses; the function updates set_job()
@@ -2034,9 +2095,9 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
             "vignette":     bool(vignette),
             "filmGrain":    bool(film_grain),
             "letterbox":    effective_letterbox,
-            # 0.85 puts the music slightly under the (silent) clip audio; user
-            # can tweak later if we ever add a slider.
-            "musicVolume":  0.85 if audio_path else 0.0,
+            # User-controlled in Sprint 3 via the volume slider. Clamp to
+            # [0..1] defensively — the client should already do this.
+            "musicVolume":  max(0.0, min(1.0, float(music_volume))) if audio_path else 0.0,
             "musicFadeIn":  bool(audio_path),
             "musicFadeOut": bool(audio_path),
             # Multi-clip mode in run_export_job replaces clip audio with the
@@ -2087,6 +2148,14 @@ def api_generate():
     vignette       = bool(data.get("vignette") or False)
     film_grain     = bool(data.get("film_grain") or False)
     letterbox      = bool(data.get("letterbox") or False)
+    # Sprint 3: user-set music volume (0..1) + optional catalogue track URL
+    # (relative path under /static/audio/). Both optional.
+    try:
+        music_volume = float(data.get("music_volume", 0.85))
+    except (TypeError, ValueError):
+        music_volume = 0.85
+    music_volume = max(0.0, min(1.0, music_volume))
+    music_catalogue_url = data.get("music_catalogue_url") or None
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
@@ -2107,7 +2176,8 @@ def api_generate():
     t = threading.Thread(
         target=run_pipeline,
         args=(job_id, pid, filenames, style, duration, fmt, music_filename,
-              color_grade, vignette, film_grain, letterbox),
+              color_grade, vignette, film_grain, letterbox,
+              music_volume, music_catalogue_url),
         daemon=True,
     )
     t.start()
@@ -2139,6 +2209,31 @@ def api_generate_status(job_id):
     if ui_status == "done" and job.get("output"):
         out["output_url"] = f"/exports/{job['output']}"
     return jsonify(out)
+
+
+# Catalogue of CC0 music tracks shipped under /static/audio/. One entry per
+# style — the Options panel's "Auto" mode picks the track whose `style`
+# matches the currently-selected reel style. Placeholders are synthesised
+# sine waves; swap the files in /static/audio/ for real CC0 tracks (Pixabay,
+# Free Music Archive, etc.) without touching this catalogue list.
+_MUSIC_CATALOGUE = [
+    {"id": "real_estate_calm",   "name": "Calm & Professional",
+     "style": "real_estate",     "url": "/static/audio/real_estate_calm.mp3"},
+    {"id": "social_upbeat",      "name": "Upbeat Social",
+     "style": "social",          "url": "/static/audio/social_upbeat.mp3"},
+    {"id": "cinematic_dramatic", "name": "Cinematic Dramatic",
+     "style": "cinematic",       "url": "/static/audio/cinematic_dramatic.mp3"},
+    {"id": "fast_electronic",    "name": "Fast Electronic",
+     "style": "fast",            "url": "/static/audio/fast_electronic.mp3"},
+]
+
+
+@app.route("/api/music/catalogue")
+def api_music_catalogue():
+    """Return the list of bundled CC0 tracks the client can auto-pick from.
+    The frontend matches `style` to the currently-selected reel style to
+    pre-fill the music chip when the user chooses "Auto"."""
+    return jsonify({"tracks": _MUSIC_CATALOGUE})
 
 
 @app.route("/api/export", methods=["POST"])
