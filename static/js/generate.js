@@ -194,8 +194,11 @@ import { WorkerBridge } from './worker-bridge.js';
     const uploadId = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()))
       .replace(/-/g, '').slice(0, 24);
     const total = Math.ceil(file.size / CHUNK_SIZE);
-    let last = null;
-    for (let i = 0; i < total; i++) {
+    const PARALLEL = 4;
+    let finalResponse = null;
+    let completed = 0;
+
+    async function sendChunk(i) {
       const start = i * CHUNK_SIZE;
       const end   = Math.min(file.size, start + CHUNK_SIZE);
       const chunk = file.slice(start, end);
@@ -220,14 +223,24 @@ import { WorkerBridge } from './worker-bridge.js';
         throw new Error(`chunk ${i+1}/${total}: non-JSON HTTP ${r.status}`);
       }
       if (!r.ok) throw new Error(data.error || `chunk ${i+1}/${total} failed (${r.status})`);
-      last = data;
-      const pct = Math.round(((i + 1) / total) * 100);
-      updateUploadProgress(placeholder, pct);
+      // The server returns the final assembled file metadata only on the
+      // last chunk (i == total-1). Keep that response — every other chunk
+      // returns just { ok, received, of }.
+      if (i === total - 1) finalResponse = data;
+      completed += 1;
+      updateUploadProgress(placeholder, Math.round((completed / total) * 100));
     }
-    if (!last || !last.filename) {
+
+    for (let batch = 0; batch < total; batch += PARALLEL) {
+      const indices = [];
+      for (let i = batch; i < Math.min(batch + PARALLEL, total); i++) indices.push(i);
+      await Promise.all(indices.map(sendChunk));
+    }
+
+    if (!finalResponse || !finalResponse.filename) {
       throw new Error('chunked upload finalised with no file metadata');
     }
-    return last;
+    return finalResponse;
   }
 
   function updateUploadProgress(placeholder, pct) {
@@ -248,9 +261,10 @@ import { WorkerBridge } from './worker-bridge.js';
     // Parallel — the server handles concurrent uploads + lazy probe.
     await Promise.all([...files].map(uploadOne));
     updateStatus('');
-    // First batch revealed → expose options + generate button.
+    // First batch revealed → expose options + brief + generate button.
     if (uploadedFiles.length && $('section-options').hidden) {
       showSection('section-options');
+      if ($('section-brief')) showSection('section-brief');
       showSection('section-action');
     }
     refreshGenerateEnabled();
@@ -366,6 +380,7 @@ import { WorkerBridge } from './worker-bridge.js';
 
     hideSection('section-upload');
     hideSection('section-options');
+    if ($('section-brief')) hideSection('section-brief');
     hideSection('section-action');
     showSection('section-progress');
     // Show the audio step in the progress list only when we have a track to
@@ -415,6 +430,20 @@ import { WorkerBridge } from './worker-bridge.js';
       .filter(f => !f._uploading && f.filename)
       .map(f => ({ filename: f.filename, has_face: !!f.has_face }));
 
+    // Sprint 7 — optional free-text brief, parsed server-side with regex.
+    const briefText = ($('brief-input')?.value || '').trim();
+    if (briefText) body.brief = briefText;
+
+    // Cosmetic "Crafting your story" step. The real plan is built inside
+    // /api/generate (server status flips to "planning"); this just gives
+    // the user a moment of feedback before the next status arrives.
+    const storyStep = document.querySelector('.step[data-step="story"]');
+    if (storyStep) {
+      setStep('story');
+      setProgress(0, captionsOn ? 45 : 55);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
     let data;
     try {
       const r = await fetch('/api/generate', {
@@ -433,6 +462,7 @@ import { WorkerBridge } from './worker-bridge.js';
       hideSection('section-progress');
       showSection('section-upload');
       showSection('section-options');
+      if ($('section-brief') && uploadedFiles.length) showSection('section-brief');
       showSection('section-action');
       return;
     }
@@ -487,6 +517,7 @@ import { WorkerBridge } from './worker-bridge.js';
       hideSection('section-progress');
       showSection('section-upload');
       showSection('section-options');
+      if ($('section-brief') && uploadedFiles.length) showSection('section-brief');
       showSection('section-action');
       currentJobId = null;
     }
@@ -538,6 +569,7 @@ import { WorkerBridge } from './worker-bridge.js';
     hideSection('section-result');
     showSection('section-upload');
     showSection('section-options');
+    if ($('section-brief') && uploadedFiles.length) showSection('section-brief');
     showSection('section-action');
   }
 
@@ -1014,6 +1046,20 @@ import { WorkerBridge } from './worker-bridge.js';
     on($('btn-generate'),     'click', generateVideo);
     on($('btn-regen'),        'click', regenerate);
     on($('btn-change-style'), 'click', changeStyle);
+
+    // Brief suggestion chips — click to fill the textarea and visually
+    // highlight the active chip. Plain text only; the textarea retains
+    // focus so the user can edit before submitting.
+    document.querySelectorAll('.brief-chip').forEach(chip => {
+      on(chip, 'click', () => {
+        const ta = $('brief-input');
+        if (!ta) return;
+        ta.value = chip.dataset.brief || '';
+        document.querySelectorAll('.brief-chip').forEach(c =>
+          c.classList.toggle('on', c === chip));
+        ta.focus();
+      });
+    });
 
     // -------- Music wiring (Sprint 3: none / auto / upload) --------
     // - "None"   : audioTrack = null, slider + picker hidden

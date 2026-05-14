@@ -153,6 +153,24 @@
       </div>
     </section>
 
+    <!-- SECTION B2: BRIEF (optional textarea, AI-driven planning) -->
+    <section class="card section-brief" id="section-brief" hidden>
+      <div class="brief-head">
+        <div>
+          <div class="brief-title">Describe your vision (optional)</div>
+          <div class="brief-sub muted small">Claude reads this and builds your edit around it.</div>
+        </div>
+      </div>
+      <textarea id="brief-input" class="brief-input" rows="3" maxlength="4000"
+        placeholder="e.g. Luxury $2.5M home in Cottesloe, calm and elegant atmosphere, focus on ocean views and indoor spaces, 45 seconds for Instagram."></textarea>
+      <div class="brief-chips" id="brief-chips">
+        <button type="button" class="brief-chip" data-brief="Luxury listing in Cottesloe. Calm, editorial, ocean-forward. Focus on architecture and natural light. 45 seconds, vertical Instagram cut.">Luxury listing</button>
+        <button type="button" class="brief-chip" data-brief="Family home in a leafy suburb. Warm, lived-in, welcoming. Show the garden, kitchen, and bedrooms. 30 seconds, 16:9 for the listing portal.">Family home</button>
+        <button type="button" class="brief-chip" data-brief="Investment property with strong rental yield. Quick, informative, neutral mood. Highlight space, condition, and street appeal. 30 seconds.">Investment property</button>
+        <button type="button" class="brief-chip" data-brief="New development off-the-plan. Modern, aspirational, light-filled. Lead with the building exterior, then interiors and amenities. 45 seconds.">New development</button>
+      </div>
+    </section>
+
     <!-- SECTION C: GENERATE BUTTON -->
     <section class="section-action" id="section-action" hidden>
       <button class="btn-generate" id="btn-generate" type="button" disabled>
@@ -176,6 +194,9 @@
         </li>
         <li class="step" data-step="analyzing">
           <span class="dot"></span><span class="step-label">Analysing clips</span>
+        </li>
+        <li class="step step-story" data-step="story">
+          <span class="dot"></span><span class="step-label">Crafting your story</span>
         </li>
         <li class="step" data-step="planning">
           <span class="dot"></span><span class="step-label">Building edit plan</span>

@@ -465,6 +465,53 @@ html, body {
 }
 .btn-ghost:hover { color: var(--fg); }
 
+/* ============== BRIEF ============== */
+.section-brief { padding: 22px 24px; }
+.brief-head { margin-bottom: 12px; }
+.brief-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 16px; font-weight: 600;
+  color: var(--fg);
+}
+.brief-sub { margin-top: 2px; }
+.brief-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 80px;
+}
+.brief-input::placeholder { color: var(--muted-2); }
+.brief-input:focus { border-color: var(--gold-2); outline: none; }
+.brief-chips {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 12px;
+}
+.brief-chip {
+  background: var(--bg-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.brief-chip:hover { color: var(--fg); border-color: var(--line-2); }
+.brief-chip.on {
+  background: rgba(240,192,64,0.10);
+  color: var(--gold-2);
+  border-color: var(--gold-2);
+}
+
 /* ============== TOAST ============== */
 .toast-host {
   position: fixed; right: 22px; bottom: 22px;

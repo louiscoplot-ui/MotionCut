@@ -507,13 +507,19 @@ def upload():
     })
 
 
+CHUNK_ASSEMBLY_TIMEOUT_SECONDS = 30.0
+
+
 @app.route("/api/upload/chunk", methods=["POST"])
 def upload_chunk():
     """
     Chunked upload to bypass reverse-proxy body-size limits (Codespaces, etc.).
     Form fields: uploadId, chunkIndex, totalChunks, filename, kind, chunk(file)
-    On the final chunk we assemble, probe duration, and return the same shape
-    as /api/upload.
+
+    Sprint 7: chunks may arrive out of order (client uploads 4 in parallel per
+    batch). Each chunk is saved to its own file `<upload_id>.chunk.NNNNNN`.
+    The request handling the final chunk (idx == total-1) waits until every
+    chunk is on disk, concatenates them in order, then deletes the parts.
     """
     upload_id = request.form.get("uploadId", "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", upload_id):
@@ -530,15 +536,24 @@ def upload_chunk():
     if not chunk:
         return jsonify({"error": "no chunk"}), 400
 
-    part_path = TMP_DIR / f"{upload_id}.part"
-    # Append chunks in order. We require client to send sequentially.
-    with open(part_path, "ab") as f:
-        chunk.save(f)
+    part_path = TMP_DIR / f"{upload_id}.chunk.{idx:06d}"
+    chunk.save(str(part_path))
 
     if idx < total - 1:
         return jsonify({"ok": True, "received": idx + 1, "of": total})
 
-    # Final chunk: finalize
+    # Final chunk: wait for every part, then assemble in order.
+    deadline = time.monotonic() + CHUNK_ASSEMBLY_TIMEOUT_SECONDS
+    missing = None
+    while time.monotonic() < deadline:
+        missing = [i for i in range(total)
+                   if not (TMP_DIR / f"{upload_id}.chunk.{i:06d}").exists()]
+        if not missing:
+            break
+        time.sleep(0.05)
+    if missing:
+        return jsonify({"error": f"chunk assembly timed out, missing: {missing[:5]}"}), 504
+
     filename = request.form.get("filename", "upload.bin")
     ext = Path(filename).suffix.lower()
     kind = request.form.get("kind", "auto")
@@ -547,11 +562,13 @@ def upload_chunk():
         elif ext in ALLOWED_IMAGE: kind = "image"
         elif ext in ALLOWED_AUDIO: kind = "audio"
         else:
-            part_path.unlink(missing_ok=True)
+            for i in range(total):
+                (TMP_DIR / f"{upload_id}.chunk.{i:06d}").unlink(missing_ok=True)
             return jsonify({"error": f"unsupported extension {ext}"}), 400
     allowed = {"video": ALLOWED_VIDEO, "image": ALLOWED_IMAGE, "audio": ALLOWED_AUDIO}[kind]
     if ext not in allowed:
-        part_path.unlink(missing_ok=True)
+        for i in range(total):
+            (TMP_DIR / f"{upload_id}.chunk.{i:06d}").unlink(missing_ok=True)
         return jsonify({"error": f"{ext} not allowed for {kind}"}), 400
 
     project = request.form.get("project") or "default"
@@ -560,7 +577,13 @@ def upload_chunk():
     fid = uuid.uuid4().hex[:12]
     fname = f"{fid}_{safe_name(filename)}"
     out_path = out_dir / fname
-    shutil.move(str(part_path), str(out_path))
+
+    with open(out_path, "wb") as out_f:
+        for i in range(total):
+            piece = TMP_DIR / f"{upload_id}.chunk.{i:06d}"
+            with open(piece, "rb") as in_f:
+                shutil.copyfileobj(in_f, out_f, length=1024 * 1024)
+            piece.unlink(missing_ok=True)
 
     # Skip the synchronous probe — it's the slowest step on large files and
     # blocks the parallel upload pipeline. The frontend calls /api/probe
@@ -1644,10 +1667,12 @@ def build_segments_chain(segments, target_w, target_h, fps=SEGMENT_FPS):
     # 1) Normalize each segment input: rescale to the target canvas, lock fps,
     #    and reset PTS so xfade offsets are measured from each clip's own zero.
     #    Locking fps avoids xfade timing drift when sources have varying frame rates.
+    # Fill the canvas: scale UP to cover, then crop the excess. Better for
+    # drone footage (no letterbox bars) at the cost of clipping edges.
     for i, seg in enumerate(segments):
         parts.append(
-            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
             f"setsar=1,fps={fps},format=yuv420p,setpts=PTS-STARTPTS[s{i}v]"
         )
 
@@ -2094,12 +2119,81 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
 # /api/generate — one-shot pipeline (upload → analyse → plan → render).
 # Replaces the manual editing flow. Reuses run_export_job + analysis helpers.
 # ----------------------------------------------------------------------------
+_BRIEF_KEYWORDS_GRADE = (
+    (r"\b(luxury|premium|high[- ]end|elegant|sotheby|christie)\b", "moody_dark"),
+    (r"\b(family|home|kids|welcoming|warm|cosy|cozy)\b",          "bright_airy"),
+    (r"\b(investment|rental|clean|professional|portal|listing)\b", "natural"),
+    (r"\b(cinematic|drama|moody|sunset|night)\b",                  "moody_dark"),
+    (r"\b(bright|airy|sunny|light|fresh)\b",                       "bright_airy"),
+)
+_BRIEF_STYLE_HINTS = (
+    (r"\b(fast|dynamic|energetic|punchy|reel|tiktok)\b", "fast"),
+    (r"\b(cinematic|slow|contemplative|hero|teaser)\b",  "cinematic"),
+    (r"\b(social|instagram|reel)\b",                     "social"),
+    (r"\b(real[- ]estate|property|listing|home tour)\b", "real_estate"),
+)
+
+
+def _parse_brief(brief, style, duration, format_str, color_grade):
+    """Map a free-text brief to overrides for the planner inputs.
+
+    Pure regex/keyword heuristics — no model call. Returns a tuple
+    (style, duration, format_str, color_grade, hints) where `hints` is a
+    dict of extra signals the planner can read (calm, family). The
+    caller's existing values win when the brief doesn't carry a signal."""
+    hints = {"calm": False, "family": False, "luxury": False}
+    if not brief:
+        return style, duration, format_str, color_grade, hints
+    text = brief.lower()
+
+    # Color grade — first match wins.
+    for pattern, grade in _BRIEF_KEYWORDS_GRADE:
+        if re.search(pattern, text):
+            color_grade = grade
+            break
+
+    # Style — only override if the caller picked the default real_estate.
+    # That way "real_estate + brief mentions fast" → fast, but a deliberate
+    # choice of "cinematic" sticks even if "instagram" appears in the brief.
+    if style in (None, "", "real_estate"):
+        for pattern, hinted in _BRIEF_STYLE_HINTS:
+            if re.search(pattern, text):
+                style = hinted
+                break
+
+    # Format hints.
+    if re.search(r"\b(instagram|reel|9[: ]?16|vertical|story|stories|tiktok)\b", text):
+        format_str = "9:16"
+    elif re.search(r"\b(square|1[: ]?1)\b", text):
+        format_str = "1:1"
+    elif re.search(r"\b(landscape|16[: ]?9|horizontal|youtube)\b", text):
+        format_str = "16:9"
+
+    # Duration — first integer followed by 's' or 'sec' / 'seconds'.
+    m = re.search(r"\b(\d{1,3})\s*(?:s|sec|secs|seconds?)\b", text)
+    if m:
+        dur = int(m.group(1))
+        if 5 <= dur <= 180:
+            duration = dur
+
+    # Mood hints the planner reads directly.
+    if re.search(r"\b(calm|elegant|relaxed|breathe|breathing|serene)\b", text):
+        hints["calm"] = True
+    if re.search(r"\b(family|home|kids|welcoming|lived[- ]in)\b", text):
+        hints["family"] = True
+    if re.search(r"\b(luxury|premium|high[- ]end)\b", text):
+        hints["luxury"] = True
+
+    return style, duration, format_str, color_grade, hints
+
+
 def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                  music_filename=None, color_grade="natural",
                  vignette=False, film_grain=False, letterbox=False,
                  music_volume=0.85, music_catalogue_url=None,
                  layers=None, caption_segments=None,
-                 caption_style="subtitles", clip_metadata=None):
+                 caption_style="subtitles", clip_metadata=None,
+                 brief=None):
     """Single-thread pipeline driving the four UI steps the user sees:
        analyzing → planning → rendering → done. All state goes through
        set_job() so the existing job tracker / status endpoint stays the
@@ -2130,13 +2224,32 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
                 if "has_face" in cm:
                     a["has_face"] = bool(cm["has_face"])
 
+        # Sprint 7 — parse the optional brief and apply its hints to the
+        # planner inputs. Pure regex; the parser only overrides fields the
+        # caller didn't pin explicitly (style stays put unless it was the
+        # default real_estate, which is the "I didn't choose" signal).
+        brief_text = (brief or "").strip()
+        brief_hints = {}
+        if brief_text:
+            new_style, new_duration, new_format, new_grade, brief_hints = \
+                _parse_brief(brief_text, style, duration, format_str, color_grade)
+            if (new_style, new_duration, new_format, new_grade) != \
+               (style, duration, format_str, color_grade):
+                print(f"[brief] applied overrides: style={style}->{new_style} "
+                      f"duration={duration}->{new_duration} format={format_str}->{new_format} "
+                      f"grade={color_grade}->{new_grade} hints={brief_hints}",
+                      flush=True)
+            style, duration, format_str, color_grade = \
+                new_style, new_duration, new_format, new_grade
+            set_job(job_id, brief_hints=brief_hints)
+
         set_job(job_id, status="planning", progress=40, eta_seconds=40)
-        # 2. Build the edit plan. If the smart planner raises (bad clip
-        #    metadata, weird input), fall back to a sequential cut.
+        # 2. Build the edit plan via the local 3-act narrative planner.
+        #    Falls back to a sequential cut if the smart path raises.
         import auto_planner
         try:
             edit_plan = auto_planner.generate_edit_plan(
-                analyses, style, duration, format_str
+                analyses, style, duration, format_str, brief_hints=brief_hints
             )
         except Exception as plan_err:
             print(f"[generate] smart planner failed ({plan_err!r}); "
@@ -2351,6 +2464,12 @@ def api_generate():
     clip_metadata = data.get("clip_metadata") or []
     if not isinstance(clip_metadata, list):
         clip_metadata = []
+    # Sprint 7 — optional free-text brief. Parsed server-side with regex
+    # heuristics in run_pipeline; missing/empty falls back to the default
+    # auto_planner path with the caller's explicit style/duration/format.
+    brief = (data.get("brief") or "").strip()
+    if len(brief) > 4000:
+        brief = brief[:4000]
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
@@ -2373,7 +2492,7 @@ def api_generate():
         args=(job_id, pid, filenames, style, duration, fmt, music_filename,
               color_grade, vignette, film_grain, letterbox,
               music_volume, music_catalogue_url, layers,
-              caption_segments, caption_style, clip_metadata),
+              caption_segments, caption_style, clip_metadata, brief),
         daemon=True,
     )
     t.start()
