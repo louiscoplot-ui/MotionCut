@@ -2560,6 +2560,136 @@ def api_export():
     })
 
 
+# ----------------------------------------------------------------------------
+# Sprint 8 — speed re-export. Takes a finished job's output mp4 and re-encodes
+# it with FFmpeg setpts (video) + chained atempo (audio) so the user can grab
+# a slowed-down or sped-up cut without re-running the whole pipeline.
+# ----------------------------------------------------------------------------
+SPEED_MIN = 0.25
+SPEED_MAX = 10.0
+SPEED_FFMPEG_TIMEOUT = 120
+
+
+def _build_speed_filters(speed):
+    """Return (video_filter, audio_filter) strings for the requested speed.
+
+    setpts handles video uniformly. atempo is hard-clamped to [0.5, 2.0]
+    per filter, so we chain copies and finish with a remainder factor when
+    the speed is outside that range. Examples:
+      0.25  -> atempo=0.5,atempo=0.5
+      10.0  -> atempo=2.0,atempo=2.0,atempo=2.5
+    """
+    vf = f"setpts={1.0 / speed:.6f}*PTS"
+
+    if abs(speed - 1.0) < 1e-3:
+        return vf, "anull"
+
+    parts = []
+    s = float(speed)
+    if s < 0.5:
+        while s < 0.5 - 1e-6:
+            parts.append("atempo=0.5")
+            s /= 0.5
+        if abs(s - 1.0) > 1e-3:
+            parts.append(f"atempo={s:.4f}")
+    elif s > 2.0:
+        while s > 2.0 + 1e-6:
+            parts.append("atempo=2.0")
+            s /= 2.0
+        if abs(s - 1.0) > 1e-3:
+            parts.append(f"atempo={s:.4f}")
+    else:
+        parts.append(f"atempo={s:.4f}")
+    return vf, ",".join(parts) if parts else "anull"
+
+
+def _run_speed_export(speed_job_id, src_path, out_path, speed):
+    """Worker thread: run FFmpeg setpts + atempo, update the job tracker."""
+    try:
+        set_job(speed_job_id, status="running", progress=5)
+        vf, af = _build_speed_filters(speed)
+        cmd = [
+            FFMPEG, "-y",
+            "-i", str(src_path),
+            "-filter:v", vf,
+            "-filter:a", af,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        print(f"[speed-export] {speed_job_id}: speed={speed} vf={vf!r} af={af!r}",
+              flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=SPEED_FFMPEG_TIMEOUT)
+        if proc.returncode != 0:
+            tail = (proc.stderr or "")[-1500:]
+            print(f"[speed-export] {speed_job_id} FFmpeg failed:\n{tail}", flush=True)
+            set_job(speed_job_id, status="error",
+                    error=f"FFmpeg exited {proc.returncode}: {tail.splitlines()[-1] if tail else 'unknown'}")
+            return
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            set_job(speed_job_id, status="error", error="output file missing")
+            return
+        set_job(speed_job_id, status="done", progress=100,
+                output=out_path.name, url=f"/exports/{out_path.name}")
+    except subprocess.TimeoutExpired:
+        set_job(speed_job_id, status="error",
+                error=f"FFmpeg timed out after {SPEED_FFMPEG_TIMEOUT}s")
+    except Exception as e:
+        set_job(speed_job_id, status="error", error=str(e))
+
+
+@app.route("/api/speed-export", methods=["POST"])
+def api_speed_export():
+    """POST { job_id, speed } → { ok, speed_job_id }.
+
+    Re-encodes the source job's finished mp4 at a different playback speed.
+    Polled via the existing /api/export/progress/<id> endpoint; that
+    endpoint returns the raw job dict, so we stash `url` directly on the
+    job so the client doesn't need a second round-trip."""
+    data = request.get_json(force=True, silent=True) or {}
+    src_job_id = (data.get("job_id") or "").strip()
+    try:
+        speed = float(data.get("speed"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "speed must be a number"}), 400
+    if not (SPEED_MIN <= speed <= SPEED_MAX):
+        return jsonify({"error": f"speed must be between {SPEED_MIN} and {SPEED_MAX}"}), 400
+    if not src_job_id:
+        return jsonify({"error": "job_id required"}), 400
+
+    src_job = get_job(src_job_id)
+    if not src_job:
+        return jsonify({"error": "unknown job_id"}), 404
+    if src_job.get("status") != "done":
+        return jsonify({"error": "source job has not finished"}), 409
+    src_name = src_job.get("output")
+    if not src_name:
+        return jsonify({"error": "source job has no output file"}), 409
+    src_path = EXPORT_DIR / src_name
+    if not src_path.exists():
+        return jsonify({"error": "source output file is gone"}), 410
+
+    speed_job_id = uuid.uuid4().hex[:12]
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    speed_str = (f"{speed:g}").replace(".", "p")
+    out_name = f"motioncut_speed{speed_str}x_{timestamp}.mp4"
+    out_path = EXPORT_DIR / out_name
+
+    set_job(speed_job_id, status="queued", progress=0,
+            source_job=src_job_id, speed=speed)
+    threading.Thread(
+        target=_run_speed_export,
+        args=(speed_job_id, src_path, out_path, speed),
+        daemon=True,
+    ).start()
+    return jsonify({"ok": True, "speed_job_id": speed_job_id})
+
+
 @app.route("/api/export/progress/<job_id>")
 def api_progress(job_id):
     job = get_job(job_id)
