@@ -56,6 +56,20 @@ html, body {
 .brand-name { font-family: 'Syne', sans-serif; font-weight: 700; letter-spacing: 0.02em; }
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 .build-tag { color: var(--muted-2); }
+.mode-link {
+  color: var(--gold-2, #c9a84c);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border: 1px solid var(--line-2, rgba(255,255,255,0.12));
+  border-radius: 999px;
+  transition: all 0.15s ease;
+}
+.mode-link:hover {
+  border-color: var(--gold-2, #c9a84c);
+  background: rgba(201,168,76,0.08);
+}
 
 /* ============== STAGE ============== */
 .stage {

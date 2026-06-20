@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MotionCut — Cinematic editor</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Syne:wght@600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Bebas+Neue&family=Orbitron:wght@500;700;900&family=Teko:wght@400;500;600;700&family=Playfair+Display:wght@400;700&family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+
+<!-- ============= FULL-SCREEN DROP OVERLAY ============= -->
+<div id="drop-overlay" class="drop-overlay">
+  <div class="drop-overlay-inner">
+    <div class="drop-overlay-icon"><i data-lucide="upload-cloud"></i></div>
+    <div class="drop-overlay-title" data-i18n="drop.title">Drop to import</div>
+    <div class="drop-overlay-sub" data-i18n="drop.sub">Video · image · audio</div>
+  </div>
+</div>
+
+<!-- ============= COMMAND PALETTE ============= -->
+<div id="cmdk-backdrop" class="cmdk-backdrop">
+  <div class="cmdk" role="dialog" aria-label="Command palette">
+    <div class="cmdk-input-row">
+      <i data-lucide="search" class="cmdk-icon"></i>
+      <input id="cmdk-input" type="text" placeholder="Type a command — try “export 9:16” or “grade teal”…" autocomplete="off" />
+      <kbd>esc</kbd>
+    </div>
+    <div id="cmdk-results" class="cmdk-results"></div>
+  </div>
+</div>
+
+<!-- ============= CONTEXT MENU ============= -->
+<div id="ctx-menu" class="ctx-menu" role="menu"></div>
+
+<!-- ============= MAGIC EDIT MODAL ============= -->
+<div id="magic-backdrop" class="magic-backdrop">
+  <div class="magic" role="dialog" aria-label="Magic Edit">
+    <div class="magic-head">
+      <div class="magic-title">
+        <i data-lucide="sparkles"></i>
+        <span data-i18n="magic.title">Magic Edit</span>
+      </div>
+      <div class="magic-sub" data-i18n="magic.sub">Drop in your media. Pick a vibe. Let MotionCut compose a first cut.</div>
+    </div>
+    <div class="magic-body">
+      <div class="magic-row">
+        <label data-i18n="magic.duration">Duration</label>
+        <div class="magic-chips" data-group="duration">
+          <button class="magic-chip on"  data-value="15">15 s</button>
+          <button class="magic-chip"     data-value="30">30 s</button>
+          <button class="magic-chip"     data-value="45">45 s</button>
+          <button class="magic-chip"     data-value="60">60 s</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.aspect">Aspect</label>
+        <div class="magic-chips" data-group="aspect">
+          <button class="magic-chip on"  data-value="16:9">16:9</button>
+          <button class="magic-chip"     data-value="9:16">9:16</button>
+          <button class="magic-chip"     data-value="1:1">1:1</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.style">Style</label>
+        <div class="magic-chips wrap" data-group="style">
+          <button class="magic-chip on"  data-value="cinematic">Cinematic</button>
+          <button class="magic-chip"     data-value="luxury_re">Luxury real estate</button>
+          <button class="magic-chip"     data-value="social_reel">Social reel</button>
+          <button class="magic-chip"     data-value="editorial">Editorial</button>
+          <button class="magic-chip"     data-value="modern_luxury">Modern luxury</button>
+          <button class="magic-chip"     data-value="moody">Moody</button>
+          <button class="magic-chip"     data-value="energetic">Energetic</button>
+          <button class="magic-chip"     data-value="corporate">Corporate</button>
+        </div>
+      </div>
+      <div class="magic-row">
+        <label data-i18n="magic.pacing">Pacing</label>
+        <div class="magic-chips" data-group="pacing">
+          <button class="magic-chip"     data-value="slow">Slow cinematic</button>
+          <button class="magic-chip on"  data-value="balanced">Balanced</button>
+          <button class="magic-chip"     data-value="fast">Fast social</button>
+        </div>
+      </div>
+      <div id="magic-summary" class="magic-summary"></div>
+
+      <!-- Loading state (shown while clip analysis + planning runs) -->
+      <div id="magic-loading" class="magic-loading hidden">
+        <div class="magic-spinner"></div>
+        <div class="magic-loading-text" id="magic-loading-text">Analyzing clips…</div>
+        <div class="magic-loading-sub muted small" id="magic-loading-sub">FFmpeg signalstats · scene detection · sharpness sampling</div>
+      </div>
+
+      <!-- Preview state (shown after the planner returns) -->
+      <div id="magic-preview" class="magic-preview hidden"></div>
+
+      <!-- Inline error surface — populated by the Generate handler when
+           /api/auto-edit fails so the user can retry without losing the modal. -->
+      <div id="magic-error" class="magic-error hidden"></div>
+    </div>
+
+    <div class="magic-foot">
+      <button id="magic-cancel" class="cta-outline" data-i18n="magic.cancel">Cancel</button>
+      <button id="magic-regen"  class="cta-outline hidden">
+        <i data-lucide="rotate-ccw"></i><span>Regenerate</span>
+      </button>
+      <button id="magic-go" class="cta" type="button">
+        <i data-lucide="wand-sparkles"></i>
+        <span data-i18n="magic.generate">Generate cinematic edit</span>
+      </button>
+      <button id="magic-apply" class="cta hidden">
+        <i data-lucide="check"></i><span>Apply edit</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ============= TOPBAR ============= -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">
+      <span class="logo-mark"></span>
+      <h1>Motion<span>Cut</span></h1>
+    </div>
+    <div class="topbar-divider"></div>
+
+    <!-- Project picker -->
+    <div class="project-picker">
+      <button id="btn-project" class="project-btn" title="Project">
+        <i data-lucide="folder"></i>
+        <span id="project-name">Default</span>
+        <i data-lucide="chevron-down" class="chev"></i>
+      </button>
+      <div id="project-menu" class="project-menu hidden">
+        <div class="project-list" id="project-list"></div>
+        <div class="project-divider"></div>
+        <button id="btn-rename-project" class="project-new">
+          <i data-lucide="bookmark"></i>
+          <span data-i18n="project.save_as">Save current as…</span>
+        </button>
+        <button id="btn-new-project" class="project-new">
+          <i data-lucide="folder-plus"></i>
+          <span data-i18n="project.new">New project</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="topbar-divider"></div>
+    <button id="cmdk-trigger" class="cmdk-trigger" title="Command palette (⌘K)">
+      <i data-lucide="search"></i>
+      <span data-i18n="topbar.cmdk">Search · run command</span>
+      <kbd>⌘ K</kbd>
+    </button>
+  </div>
+
+  <div class="topbar-right">
+    <a class="mode-link" href="/" title="Back to AI auto-edit">&larr; AI auto-edit</a>
+    <div class="topbar-divider"></div>
+    <button id="btn-undo"  class="ic-btn" title="Undo (⌘Z)" data-i18n-attr="title:topbar.undo"><i data-lucide="undo-2"></i></button>
+    <button id="btn-redo"  class="ic-btn" title="Redo (⌘Y)" data-i18n-attr="title:topbar.redo"><i data-lucide="redo-2"></i></button>
+    <div class="topbar-divider"></div>
+    <button id="btn-save-project" class="ic-btn" title="Save project" data-i18n-attr="title:topbar.save"><i data-lucide="save"></i></button>
+    <label class="ic-btn" for="load-project" title="Load project" data-i18n-attr="title:topbar.load">
+      <i data-lucide="folder-open"></i>
+      <input type="file" id="load-project" accept="application/json" hidden />
+    </label>
+    <div class="topbar-divider"></div>
+    <button id="btn-theme" class="ic-btn" title="Toggle theme" data-i18n-attr="title:topbar.theme"><i data-lucide="sun"></i></button>
+    <button id="btn-lang" class="ic-btn lang-btn" title="Language" data-i18n-attr="title:topbar.lang"><span class="lang-label">EN</span></button>
+    <button id="btn-magic" class="magic-btn" title="Magic Edit (AI-assisted cinematic edit)">
+      <i data-lucide="sparkles"></i>
+      <span data-i18n="magic.btn">Magic Edit</span>
+    </button>
+    <span id="ffmpeg-status" class="status-dot" title="FFmpeg status">
+      <span class="dot"></span><span class="lbl" data-i18n="topbar.ffmpeg">FFmpeg</span>
+    </span>
+  </div>
+</header>
+
+<!-- ============= LAYOUT: STAGE + RIGHT RAIL ============= -->
+<main class="layout">
+
+  <!-- ===== STAGE COLUMN ===== -->
+  <section class="stage-col">
+
+    <div class="stage-toolbar">
+      <button id="btn-play" class="play-btn" title="Play / Pause (Space)">
+        <i data-lucide="play" id="play-icon"></i>
+      </button>
+
+      <span id="time-display" class="timecode">00:00 / 00:00</span>
+
+      <div class="aspect-segmented" role="tablist"
+           data-i18n-attr="title:aspect.16_9.desc">
+        <button class="aspect on" data-aspect="16:9" role="tab"
+                data-i18n-attr="title:aspect.16_9.desc">16:9</button>
+        <button class="aspect"    data-aspect="9:16" role="tab"
+                data-i18n-attr="title:aspect.9_16.desc">9:16</button>
+        <button class="aspect"    data-aspect="1:1"  role="tab"
+                data-i18n-attr="title:aspect.1_1.desc">1:1</button>
+      </div>
+      <div class="aspect-desc" id="aspect-desc" data-i18n="aspect.16_9.desc">YouTube · Vimeo · TV · widescreen cinematic</div>
+
+      <div class="grow"></div>
+
+      <button class="ic-btn ghost" id="btn-fit"  title="Fit to screen"><i data-lucide="maximize-2"></i></button>
+      <button class="ic-btn ghost" id="btn-mute" title="Mute"><i data-lucide="volume-2"></i></button>
+    </div>
+
+    <div id="stage-wrap" class="stage-wrap aspect-16-9">
+      <div id="stage-empty" class="stage-empty">
+        <div class="stage-empty-icon"><i data-lucide="film"></i></div>
+        <div class="stage-empty-title" data-i18n="stage.empty.title">Drop your footage anywhere</div>
+        <div class="stage-empty-sub" data-i18n="stage.empty.sub">MP4 · MOV · WebM — up to 2GB · 100% local</div>
+        <button class="btn-quiet" id="stage-empty-pick">
+          <i data-lucide="file-video-2"></i> <span data-i18n="stage.empty.browse">Or browse files</span>
+        </button>
+      </div>
+
+      <div id="stage-inner" class="stage-inner">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <!-- Floating canvas toolbar (appears on selection) -->
+        <div id="canvas-floating" class="canvas-floating hidden">
+          <button data-action="duplicate" title="Duplicate"><i data-lucide="copy"></i></button>
+          <button data-action="bring-front" title="Bring to front"><i data-lucide="chevrons-up"></i></button>
+          <button data-action="send-back" title="Send to back"><i data-lucide="chevrons-down"></i></button>
+          <span class="cf-divider"></span>
+          <button data-action="lock" title="Lock"><i data-lucide="lock"></i></button>
+          <button data-action="hide" title="Hide"><i data-lucide="eye-off"></i></button>
+          <span class="cf-divider"></span>
+          <button data-action="delete" class="danger" title="Delete"><i data-lucide="trash-2"></i></button>
+        </div>
+
+        <!-- Snap guides -->
+        <svg id="snap-svg" class="snap-svg" viewBox="0 0 1920 1080" preserveAspectRatio="none"></svg>
+
+        <!-- Drag tooltip (X/Y while dragging) -->
+        <div id="drag-tooltip" class="drag-tooltip hidden"></div>
+      </div>
+    </div>
+
+    <!-- Timeline (mounted by timeline.js) -->
+    <div class="timeline-host" id="timeline-host"></div>
+
+  </section>
+
+  <!-- ===== RIGHT RAIL ===== -->
+  <aside class="rail right-rail" id="right-rail">
+    <div class="right-rail-resize" id="right-rail-resize" title="Drag to resize · double-click to reset"></div>
+
+    <!-- ===== MEDIA ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="upload" class="head-icon"></i><span data-i18n="panel.media">Media</span></h2>
+      </div>
+
+      <!-- Pill tabs that switch between the four upload zones below -->
+      <div class="media-tabs" role="tablist">
+        <button class="media-tab on" data-tab="video" type="button" role="tab"><i data-lucide="film"></i><span>Video</span></button>
+        <button class="media-tab"    data-tab="photo" type="button" role="tab"><i data-lucide="image"></i><span>Photo</span></button>
+        <button class="media-tab"    data-tab="logo"  type="button" role="tab"><i data-lucide="bookmark"></i><span>Logo</span></button>
+        <button class="media-tab"    data-tab="music" type="button" role="tab"><i data-lucide="music"></i><span>Music</span></button>
+      </div>
+
+      <!-- One dropzone per tab; .media-pane.on is shown, others hidden -->
+      <div class="media-panes">
+        <div class="media-pane on" data-pane="video">
+          <div id="dropzone-video" class="dropzone hero">
+            <i data-lucide="film" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.video.title">Drop videos here</div>
+            <div class="dz-sub">MP4 · MOV · WebM up to 2GB</div>
+            <input type="file" id="file-video" accept="video/*" multiple hidden />
+          </div>
+        </div>
+        <div class="media-pane" data-pane="photo">
+          <div id="dropzone-photo" class="dropzone hero">
+            <i data-lucide="image" class="dz-icon"></i>
+            <div class="dz-title">Drop photos here</div>
+            <div class="dz-sub">JPG · PNG · WebP · GIF</div>
+            <input type="file" id="file-photo" accept=".jpg,.jpeg,.png,.webp,.gif,image/*" multiple hidden />
+          </div>
+        </div>
+        <div class="media-pane" data-pane="logo">
+          <div id="dropzone-image" class="dropzone hero">
+            <i data-lucide="bookmark" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.logo.title">Upload your brand logo</div>
+            <div class="dz-sub">Adds a positioned overlay</div>
+            <input type="file" id="file-image" accept="image/*" hidden />
+          </div>
+        </div>
+        <div class="media-pane" data-pane="music">
+          <div id="dropzone-audio" class="dropzone hero">
+            <i data-lucide="music" class="dz-icon"></i>
+            <div class="dz-title" data-i18n="dz.audio.title">Drop a music track</div>
+            <div class="dz-sub">MP3 · WAV · M4A</div>
+            <input type="file" id="file-audio" accept="audio/*" hidden />
+          </div>
+        </div>
+      </div>
+
+      <!-- Library: previously uploaded files in this project -->
+      <div class="library-head">
+        <span class="library-label" data-i18n="library.title">Project library</span>
+        <span class="library-grow"></span>
+        <div class="library-view-toggle" role="group" aria-label="Library view">
+          <button class="lib-view-btn on" data-view="list"  title="List view"><i data-lucide="list"></i></button>
+          <button class="lib-view-btn"    data-view="grid"  title="Grid view"><i data-lucide="grid-3x3"></i></button>
+          <button class="lib-view-btn"    data-view="large" title="Large grid"><i data-lucide="layout-grid"></i></button>
+        </div>
+        <button id="btn-library-refresh" class="ic-btn xs" title="Refresh"><i data-lucide="refresh-cw"></i></button>
+      </div>
+      <!-- Selection toolbar (slides down when items are selected) -->
+      <div id="library-selbar" class="library-selbar hidden">
+        <span class="selbar-count"><strong>0</strong> selected</span>
+        <span class="selbar-grow"></span>
+        <button class="selbar-btn" data-act="add-all" title="Add all to timeline"><i data-lucide="plus"></i><span>Add all</span></button>
+        <button class="selbar-btn danger" data-act="delete-sel" title="Delete selected"><i data-lucide="trash-2"></i><span>Delete</span></button>
+      </div>
+      <div id="library" class="library" data-view="list">
+        <div class="library-empty muted small" data-i18n="library.empty">No files in this project yet</div>
+      </div>
+    </section>
+
+    <!-- ===== LAYERS ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="layers" class="head-icon"></i><span data-i18n="panel.layers">Layers</span></h2>
+        <div class="head-actions">
+          <button id="btn-add-text"  class="ic-btn xs" title="Add text (T)" data-i18n-attr="title:add.text"><i data-lucide="type"></i></button>
+          <button id="btn-add-logo"  class="ic-btn xs" title="Add image (L)" data-i18n-attr="title:add.logo"><i data-lucide="image-plus"></i></button>
+          <button id="btn-add-color" class="ic-btn xs" title="Add overlay (O)" data-i18n-attr="title:add.color"><i data-lucide="square"></i></button>
+        </div>
+      </div>
+      <div id="layers-panel" class="layers-panel">
+        <div class="layers-empty">
+          <i data-lucide="square-stack" class="empty-icon"></i>
+          <div>No layers yet</div>
+          <div class="muted small">Add text, logo, or overlay above</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== INSPECTOR (contextual) ===== -->
+    <section class="panel" id="inspector-panel">
+      <div class="panel-head">
+        <h2><i data-lucide="sliders-horizontal" class="head-icon"></i><span id="inspector-title" data-i18n="panel.inspector">Inspector</span></h2>
+      </div>
+      <div id="layer-props" class="inspector-body">
+        <div class="inspector-empty">
+          <i data-lucide="mouse-pointer-2" class="empty-icon"></i>
+          <div class="muted small">Select a layer to edit</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== STYLE (project-level) ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="palette" class="head-icon"></i><span data-i18n="panel.style">Style</span></h2>
+      </div>
+
+      <div class="style-section-label" data-i18n="style.grade">Color grade</div>
+      <div class="grade-grid" id="grade-grid">
+        <button class="grade-chip on"  data-grade="natural"><span data-i18n="grade.natural">Natural</span></button>
+        <button class="grade-chip"     data-grade="cinematic"><span data-i18n="grade.cinematic">Cinematic</span></button>
+        <button class="grade-chip"     data-grade="teal_orange"><span data-i18n="grade.teal_orange">Teal · Orange</span></button>
+        <button class="grade-chip"     data-grade="moody_dark"><span data-i18n="grade.moody_dark">Moody</span></button>
+        <button class="grade-chip"     data-grade="bright_airy"><span data-i18n="grade.bright_airy">Airy</span></button>
+        <button class="grade-chip"     data-grade="bw"><span data-i18n="grade.bw">B&amp;W</span></button>
+      </div>
+
+      <div class="style-section-label" data-i18n="style.fx">FX</div>
+      <div class="toggle-row">
+        <label class="toggle"><input type="checkbox" id="fx-vignette" /><span data-i18n="style.fx.vignette">Vignette</span></label>
+        <label class="toggle"><input type="checkbox" id="fx-grain" /><span data-i18n="style.fx.grain">Film grain</span></label>
+      </div>
+
+      <div class="style-section-label" data-i18n="style.music">Music</div>
+      <div id="music-block">
+        <div id="music-info" class="music-info">
+          <i data-lucide="music-2"></i>
+          <span class="muted small" data-i18n="style.music.none">No music loaded</span>
+        </div>
+        <label class="row col">
+          <span><span data-i18n="style.music.volume">Volume</span> <em id="music-vol-label">60%</em></span>
+          <input type="range" id="music-volume" min="0" max="100" value="60" />
+        </label>
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="music-fadein" /><span data-i18n="style.music.fadein">Fade in</span></label>
+          <label class="toggle"><input type="checkbox" id="music-fadeout" /><span data-i18n="style.music.fadeout">Fade out</span></label>
+        </div>
+        <label class="row col">
+          <span data-i18n="style.music.mode">Mix mode</span>
+          <select id="music-mode">
+            <option value="mix"     data-i18n="style.music.mix">Mix with original</option>
+            <option value="replace" data-i18n="style.music.replace">Replace original</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <!-- ===== BRAND KIT ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="bookmark" class="head-icon"></i><span data-i18n="panel.brand">Brand Kit</span></h2>
+        <button id="brand-apply-current" class="ic-btn xs" title="Apply to current layers"><i data-lucide="sparkles"></i></button>
+      </div>
+      <label class="row col"><span data-i18n="brand.agency">Agency name</span>
+        <input type="text" id="brand-agency" placeholder="ACME Realty" />
+      </label>
+      <label class="row col"><span data-i18n="brand.tagline">Tagline</span>
+        <input type="text" id="brand-tagline" placeholder="Building tomorrow." />
+      </label>
+      <div class="row-grid-2">
+        <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.primary">Primary</span>
+          <input type="color" id="brand-primary" value="#f0c040" />
+        </label>
+        <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.secondary">Secondary</span>
+          <input type="color" id="brand-secondary" value="#1a1a1a" />
+        </label>
+      </div>
+      <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.font">Brand font</span>
+        <select id="brand-font">
+          <option>Syne</option>
+          <option>Inter</option>
+          <option>Manrope</option>
+          <option>Space Grotesk</option>
+          <option>Orbitron</option>
+          <option>Teko</option>
+          <option>Playfair Display</option>
+          <option>JetBrains Mono</option>
+          <option>Bebas Neue</option>
+        </select>
+      </label>
+      <label class="row col no-scrub"><span class="no-scrub" data-i18n="brand.logo">Logo</span>
+        <div id="brand-logo-preview" class="brand-logo-preview">
+          <i data-lucide="image"></i><span>No logo</span>
+        </div>
+      </label>
+      <div class="row brand-actions">
+        <button id="brand-logo-pick"  class="btn-quiet small"><i data-lucide="upload"></i><span data-i18n="brand.upload_logo">Upload logo</span></button>
+        <button id="brand-logo-clear" class="btn-quiet small"><i data-lucide="x"></i><span data-i18n="brand.clear">Clear</span></button>
+        <input type="file" id="brand-logo-input" accept="image/*" hidden />
+      </div>
+    </section>
+
+    <!-- ===== TEMPLATES ===== -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2><i data-lucide="sparkles" class="head-icon"></i><span data-i18n="panel.templates">Templates</span></h2>
+      </div>
+      <div class="tpl-cat">Real Estate</div>
+      <div class="templates">
+        <button class="tpl" data-template="re_drone_reveal">
+          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">$1.4M</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Drone Reveal</span>
+            <span class="tpl-desc">Drone shot · price · address</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_property_tour">
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">TOUR</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Property Tour</span>
+            <span class="tpl-desc">Cinematic walkthrough title</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_listing_card">
+          <span class="tpl-thumb real_estate"><span class="tpl-thumb-text">1:1</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Listing Card</span>
+            <span class="tpl-desc">Square · price + address</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="re_agent_intro">
+          <span class="tpl-thumb corporate"><span class="tpl-thumb-text">9:16</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Agent Intro</span>
+            <span class="tpl-desc">Vertical · lower-third</span>
+          </span>
+        </button>
+      </div>
+      <div class="tpl-cat">Social</div>
+      <div class="templates">
+        <button class="tpl" data-template="social_hook_reveal">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">HOOK</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Hook → Reveal</span>
+            <span class="tpl-desc">Wait-for-it pattern</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="social_listicle">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">5</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Listicle 5</span>
+            <span class="tpl-desc">Top-N kinetic intro</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="social">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">9:16</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name" data-i18n="tpl.social.name">Social</span>
+            <span class="tpl-desc" data-i18n="tpl.social.desc">Reels · TikTok · bold</span>
+          </span>
+        </button>
+      </div>
+      <div class="tpl-cat">Cinematic / Kinetic</div>
+      <div class="templates">
+        <button class="tpl" data-template="cinematic">
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">FILM</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name" data-i18n="tpl.cinematic.name">Cinematic</span>
+            <span class="tpl-desc" data-i18n="tpl.cinematic.desc">Letterbox · vignette · fade title</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="cinematic_three_act">
+          <span class="tpl-thumb cinematic"><span class="tpl-thumb-text">III</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Three-Act</span>
+            <span class="tpl-desc">3 dissolving title cards</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="kinetic_word_pop">
+          <span class="tpl-thumb social"><span class="tpl-thumb-text">POP</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name">Kinetic Pop</span>
+            <span class="tpl-desc">Word-by-word punch</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="travel">
+          <span class="tpl-thumb travel"><span class="tpl-thumb-text">◷</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name" data-i18n="tpl.travel.name">Travel</span>
+            <span class="tpl-desc" data-i18n="tpl.travel.desc">Full-width title reveal</span>
+          </span>
+        </button>
+        <button class="tpl" data-template="corporate">
+          <span class="tpl-thumb corporate"><span class="tpl-thumb-text">ACME</span></span>
+          <span class="tpl-info">
+            <span class="tpl-name" data-i18n="tpl.corporate.name">Corporate</span>
+            <span class="tpl-desc" data-i18n="tpl.corporate.desc">Clean · minimal · gold rule</span>
+          </span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ===== EXPORT ===== -->
+    <section class="panel export-panel">
+      <div class="panel-head">
+        <h2><i data-lucide="download" class="head-icon"></i><span data-i18n="panel.export">Export</span></h2>
+      </div>
+      <button id="btn-export-169" class="cta block">
+        <i data-lucide="monitor"></i>
+        <span data-i18n="export.169">Export 16:9</span>
+        <span class="cta-sub">1920 × 1080</span>
+      </button>
+      <button id="btn-export-916" class="cta-outline block">
+        <i data-lucide="smartphone"></i>
+        <span data-i18n="export.916">Export 9:16</span>
+        <span class="cta-sub">1080 × 1920</span>
+      </button>
+
+      <div id="export-progress" class="export-progress hidden">
+        <div class="bar"><div id="export-bar" class="bar-fill"></div></div>
+        <div id="export-status" class="muted small">Starting…</div>
+      </div>
+
+      <div id="export-done" class="export-done hidden">
+        <a id="export-link" href="#" download>
+          <i data-lucide="check-circle-2"></i>
+          <span>Download MP4</span>
+        </a>
+      </div>
+    </section>
+
+  </aside>
+</main>
+
+<!-- Toast -->
+<div id="toast" class="toast hidden"></div>
+
+<!-- i18n must load before Lucide-rendered icons + editor -->
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+<!-- Lucide icons (CDN) -->
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<!-- SortableJS for layer reordering -->
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<!-- GSAP motion engine -->
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+
+<!-- ?v=<git-sha> defeats stale browser caches when the user pulls a new
+     build. The Flask side already sends Cache-Control:no-store on /static,
+     but a query-string bust is belt-and-braces for misconfigured proxies. -->
+<script src="{{ url_for('static', filename='js/project-state.js') }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/motion.js')         }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/timeline.js')       }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/editor.js')         }}?v={{ build_version }}"></script>
+<script>if (window.lucide) lucide.createIcons();</script>
+</body>
+</html>

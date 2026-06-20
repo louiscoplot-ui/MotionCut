@@ -113,6 +113,21 @@ button { cursor: pointer; border: none; background: none; }
   border-bottom: 1px solid var(--line-1);
 }
 .topbar-left, .topbar-right { display: flex; align-items: center; gap: var(--sp-2); }
+.mode-link {
+  color: #c9a84c;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 12px;
+  border: 1px solid rgba(201,168,76,0.35);
+  border-radius: 999px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.mode-link:hover {
+  border-color: #c9a84c;
+  background: rgba(201,168,76,0.08);
+}
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 {

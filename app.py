@@ -297,6 +297,11 @@ def index():
     return render_template("index.html", build_version=_git_short_sha())
 
 
+@app.route("/edit")
+def edit():
+    return render_template("editor.html", build_version=_git_short_sha())
+
+
 @app.route("/api/version")
 def api_version():
     """Returns the current git SHA so the front-end can check for updates."""
