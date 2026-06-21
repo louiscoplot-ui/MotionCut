@@ -74,16 +74,72 @@ CORS(app)
 # ----------------------------------------------------------------------------
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+# Persist JOBS to disk so /api/generate/<id>/status survives multi-process
+# hops (gunicorn workers don't share memory) and cold restarts. The dict
+# stays in-memory for the hot path; the JSON file is the cross-process
+# fallback. Path resolved lazily — EXPORT_DIR is defined just below.
+_JOBS_FILE = None
+
+
+def _jobs_file():
+    global _JOBS_FILE
+    if _JOBS_FILE is None:
+        _JOBS_FILE = EXPORT_DIR / "jobs.json"
+    return _JOBS_FILE
+
+
+def _persist_jobs_unlocked():
+    """Atomic write of JOBS to disk. Caller holds JOBS_LOCK. Failures are
+    silenced — telemetry I/O must never break a request."""
+    try:
+        path = _jobs_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(JOBS, f)
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _hydrate_jobs_unlocked():
+    """Merge disk into JOBS for keys we don't already hold. Caller holds
+    JOBS_LOCK. In-memory wins on conflict (it may be ahead of the last flush
+    from a sibling process). Corrupt JSON is ignored — losing the tracker
+    history is fine; crashing every poll is not."""
+    path = _jobs_file()
+    if not path.exists():
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    for k, v in data.items():
+        if k not in JOBS and isinstance(v, dict):
+            JOBS[k] = v
+
+
+def _load_jobs_from_disk():
+    """Bootstrap-time hydration. Logs how many jobs were recovered."""
+    with JOBS_LOCK:
+        _hydrate_jobs_unlocked()
+    print(f"[jobs] hydrated {len(JOBS)} job(s) from {_jobs_file()}", flush=True)
 
 
 def set_job(job_id, **fields):
     with JOBS_LOCK:
         job = JOBS.setdefault(job_id, {})
         job.update(fields)
+        _persist_jobs_unlocked()
 
 
 def get_job(job_id):
     with JOBS_LOCK:
+        if job_id not in JOBS:
+            _hydrate_jobs_unlocked()
         return dict(JOBS.get(job_id, {}))
 
 
@@ -2785,6 +2841,13 @@ def _bootstrap():
     print(f" Uploads: {UPLOAD_DIR}")
     print(f" Exports: {EXPORT_DIR}")
     print("=" * 60)
+    # Rehydrate the job tracker from disk so a fresh process / sibling
+    # gunicorn worker doesn't 404 on the first status poll for a job that
+    # was registered by another process.
+    try:
+        _load_jobs_from_disk()
+    except Exception as e:
+        print(f"[jobs] hydration failed: {e}", flush=True)
     # Migrate any legacy loose files to uploads/default/
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         try: migrate_legacy_uploads()
