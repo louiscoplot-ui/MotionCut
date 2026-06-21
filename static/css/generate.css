@@ -545,6 +545,87 @@ html, body {
   border-color: var(--gold-2);
 }
 
+/* ============== SPEED CONTROLS (Sprint 8) ============== */
+.speed-controls {
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+}
+.speed-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 8px;
+}
+.speed-track {
+  display: flex; align-items: center; gap: 12px;
+}
+#speed-slider {
+  flex: 1;
+  -webkit-appearance: none; appearance: none;
+  height: 4px; border-radius: 2px;
+  background: var(--bg-3);
+  accent-color: var(--gold-2);
+  outline: none; cursor: pointer;
+}
+#speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--gold-2);
+  border: 2px solid var(--bg-1);
+  cursor: pointer; box-shadow: var(--shadow-1);
+}
+#speed-slider::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--gold-2);
+  border: 2px solid var(--bg-1);
+  cursor: pointer;
+}
+.speed-val {
+  min-width: 48px; text-align: right;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  color: var(--gold-2);
+  font-weight: 600;
+}
+.speed-presets {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 10px;
+}
+.speed-chip {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.speed-chip:hover {
+  color: var(--fg);
+  border-color: var(--gold-2);
+}
+.speed-chip.on {
+  background: rgba(240,192,64,0.10);
+  border-color: var(--gold-2);
+  color: var(--gold-2);
+}
+.speed-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 8px 0 0;
+  min-height: 18px;
+}
+.btn-download-speed { box-shadow: 0 6px 18px rgba(240,192,64,0.45); }
+.btn-primary.is-busy { opacity: 0.7; pointer-events: none; }
+
 /* ============== TOAST ============== */
 .toast-host {
   position: fixed; right: 22px; bottom: 22px;

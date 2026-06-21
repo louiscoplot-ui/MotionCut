@@ -22,6 +22,10 @@ import { WorkerBridge } from './worker-bridge.js';
   /** Cached catalogue from /api/music/catalogue — fetched lazily once. */
   let musicCatalogue = null;
   let currentJobId = null;
+  /** Last finished render's job_id — kept after currentJobId is cleared so
+   *  the speed-export button can reference it without racing the cleanup. */
+  let lastFinishedJobId = null;
+  let lastFinishedDuration = 0;     // seconds, populated when the video loads
   let pollTimer = null;
   let renderStartedAt = 0;
   /** Latest waveform (200 peak values, 0..1) and beats (s) from the audio worker.
@@ -500,6 +504,8 @@ import { WorkerBridge } from './worker-bridge.js';
       cancelPolling();
       $('result-video').src = s.output_url;
       $('btn-download').href = s.output_url;
+      lastFinishedJobId = currentJobId;
+      resetSpeedControls();
       showSection('section-result');
       hideSection('section-progress');
       const took = ((Date.now() - renderStartedAt) / 1000).toFixed(1);
@@ -551,6 +557,168 @@ import { WorkerBridge } from './worker-bridge.js';
     if ($('bar-pct'))  $('bar-pct').textContent = pct + '%';
     if (eta != null && $('bar-eta')) {
       $('bar-eta').textContent = eta > 0 ? `~${eta} s remaining` : '';
+    }
+  }
+
+  // ---------- Speed controls (Sprint 8) ----------
+  // Slider previews via the <video> element's playbackRate (instant, no
+  // server hit). The Download button intercepts: at 1× it's a plain
+  // anchor download; at any other speed it POSTs /api/speed-export and
+  // polls /api/export/progress until the re-encoded mp4 is ready.
+  let speedExportInFlight = false;
+
+  function currentSpeed() {
+    const v = parseFloat($('speed-slider')?.value);
+    return Number.isFinite(v) && v > 0 ? v : 1;
+  }
+
+  function formatDuration(s) {
+    if (!Number.isFinite(s) || s <= 0) return '?';
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const sec = Math.round(s - m * 60);
+    return `${m}m ${sec}s`;
+  }
+
+  function syncSpeedChips(speed) {
+    document.querySelectorAll('.speed-chip').forEach(c => {
+      c.classList.toggle('on', Math.abs(parseFloat(c.dataset.speed) - speed) < 0.001);
+    });
+  }
+
+  function paintSpeedHint(speed) {
+    const hint = $('speed-hint'); if (!hint) return;
+    if (Math.abs(speed - 1) < 0.001 || !lastFinishedDuration) {
+      hint.textContent = '';
+    } else {
+      const newDur = lastFinishedDuration / speed;
+      hint.textContent = `Original: ${formatDuration(lastFinishedDuration)} → at ${speed}×: ${formatDuration(newDur)}`;
+    }
+  }
+
+  function paintDownloadButton(speed) {
+    const btn = $('btn-download');
+    if (!btn) return;
+    const labelSpan = btn.querySelector('span') || btn;
+    if (Math.abs(speed - 1) < 0.001) {
+      btn.textContent = '';
+      btn.appendChild(downloadIconSvg());
+      btn.appendChild(document.createTextNode(' Download'));
+      btn.classList.remove('btn-download-speed');
+    } else {
+      btn.textContent = '';
+      btn.appendChild(downloadIconSvg());
+      btn.appendChild(document.createTextNode(` Download at ${speed}×`));
+      btn.classList.add('btn-download-speed');
+    }
+  }
+
+  function downloadIconSvg() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '18'); svg.setAttribute('height', '18');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2');
+    svg.innerHTML = '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+                  + '<polyline points="7 10 12 15 17 10"/>'
+                  + '<line x1="12" y1="15" x2="12" y2="3"/>';
+    return svg;
+  }
+
+  function applySpeed(speed) {
+    const v = $('result-video');
+    if (v) v.playbackRate = speed;
+    const valEl = $('speed-val');
+    if (valEl) valEl.textContent = `${speed}×`;
+    syncSpeedChips(speed);
+    paintSpeedHint(speed);
+    paintDownloadButton(speed);
+  }
+
+  function resetSpeedControls() {
+    const slider = $('speed-slider');
+    if (slider) slider.value = '1';
+    const v = $('result-video');
+    if (v) {
+      v.playbackRate = 1;
+      // Refresh duration once metadata is in.
+      const setDur = () => {
+        if (Number.isFinite(v.duration)) {
+          lastFinishedDuration = v.duration;
+          paintSpeedHint(currentSpeed());
+        }
+      };
+      v.addEventListener('loadedmetadata', setDur, { once: true });
+      if (Number.isFinite(v.duration) && v.duration > 0) setDur();
+    }
+    applySpeed(1);
+  }
+
+  async function downloadHandler(ev) {
+    const speed = currentSpeed();
+    if (Math.abs(speed - 1) < 0.001) {
+      // Plain download — let the anchor's default behaviour run.
+      return;
+    }
+    ev.preventDefault();
+    if (speedExportInFlight) return;
+    if (!lastFinishedJobId) {
+      toast('No finished render to re-export.', { kind: 'error' });
+      return;
+    }
+    const btn = $('btn-download');
+    speedExportInFlight = true;
+    const originalLabel = btn.textContent;
+    btn.classList.add('is-busy');
+    btn.textContent = 'Processing…';
+
+    try {
+      const r = await fetch('/api/speed-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: lastFinishedJobId, speed }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      const speedJobId = d.speed_job_id;
+      // Poll every 1.5s; bail after ~150s as a hard ceiling.
+      const startedAt = Date.now();
+      await new Promise((resolve, reject) => {
+        const tick = async () => {
+          if (Date.now() - startedAt > 150000) {
+            reject(new Error('timed out waiting for speed export'));
+            return;
+          }
+          try {
+            const sr = await fetch(`/api/export/progress/${encodeURIComponent(speedJobId)}`);
+            const s = await sr.json();
+            if (s.status === 'done' && s.url) {
+              btn.textContent = `Download at ${speed}×`;
+              const a = document.createElement('a');
+              a.href = s.url; a.download = '';
+              document.body.appendChild(a); a.click(); a.remove();
+              toast(`Speed export ready (${speed}×).`, { kind: 'success' });
+              resolve();
+            } else if (s.status === 'error') {
+              reject(new Error(s.error || 'speed export failed'));
+            } else {
+              btn.textContent = `Processing… ${s.progress || 0}%`;
+              setTimeout(tick, 1500);
+            }
+          } catch (pollErr) {
+            reject(pollErr);
+          }
+        };
+        tick();
+      });
+    } catch (err) {
+      toast('Speed export failed: ' + err.message, { kind: 'error', duration: 6000 });
+      btn.textContent = originalLabel;
+    } finally {
+      speedExportInFlight = false;
+      btn.classList.remove('is-busy');
+      paintDownloadButton(currentSpeed());
     }
   }
 
@@ -1046,6 +1214,21 @@ import { WorkerBridge } from './worker-bridge.js';
     on($('btn-generate'),     'click', generateVideo);
     on($('btn-regen'),        'click', regenerate);
     on($('btn-change-style'), 'click', changeStyle);
+    on($('btn-download'),     'click', downloadHandler);
+
+    // Speed slider — preview live via playbackRate; also paint chips + hint.
+    const speedSlider = $('speed-slider');
+    if (speedSlider) {
+      on(speedSlider, 'input', () => applySpeed(parseFloat(speedSlider.value)));
+    }
+    document.querySelectorAll('.speed-chip').forEach(chip => {
+      on(chip, 'click', () => {
+        const s = parseFloat(chip.dataset.speed);
+        if (!Number.isFinite(s)) return;
+        if (speedSlider) speedSlider.value = String(s);
+        applySpeed(s);
+      });
+    });
 
     // Brief suggestion chips — click to fill the textarea and visually
     // highlight the active chip. Plain text only; the textarea retains

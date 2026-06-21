@@ -222,6 +222,26 @@
       <h2 class="result-title">Your edit is ready</h2>
       <video id="result-video" controls playsinline preload="metadata"></video>
       <canvas id="waveform-canvas" class="waveform" width="800" height="80" hidden></canvas>
+
+      <!-- Sprint 8: speed controls. Slider previews via playbackRate; the
+           Download button re-exports server-side when speed != 1. -->
+      <div class="speed-controls" id="speed-controls">
+        <label class="speed-label" for="speed-slider">Speed</label>
+        <div class="speed-track">
+          <input type="range" id="speed-slider" min="0.25" max="10" step="0.25" value="1">
+          <span class="speed-val" id="speed-val">1×</span>
+        </div>
+        <div class="speed-presets">
+          <button type="button" class="speed-chip"    data-speed="0.25">0.25×</button>
+          <button type="button" class="speed-chip"    data-speed="0.5">0.5×</button>
+          <button type="button" class="speed-chip on" data-speed="1">1× (original)</button>
+          <button type="button" class="speed-chip"    data-speed="2">2×</button>
+          <button type="button" class="speed-chip"    data-speed="4">4×</button>
+          <button type="button" class="speed-chip"    data-speed="10">10×</button>
+        </div>
+        <p class="speed-hint" id="speed-hint"></p>
+      </div>
+
       <div class="result-actions">
         <a id="btn-download" class="btn-primary" href="#" download>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
