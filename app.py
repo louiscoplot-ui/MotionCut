@@ -366,6 +366,37 @@ def health():
     })
 
 
+@app.route("/api/project/version")
+def api_project_version():
+    """Monotonic counter bumped by every MCP-driven mutation. The frontend
+    polls this every 2s; if it changes, the timeline reloads the project
+    document so MCP-applied edits surface in the UI without a hard reload."""
+    try:
+        import mcp_server
+        return jsonify({"version": mcp_server.get_version(),
+                        "active_project": mcp_server.get_active_project()})
+    except Exception:
+        return jsonify({"version": 0, "active_project": "default"})
+
+
+@app.route("/api/mcp/info")
+def api_mcp_info():
+    """Used by the topbar badge to detect whether the local MCP server is
+    reachable and to expose the Claude Desktop config block for copy."""
+    try:
+        import mcp_server
+        return jsonify({
+            "ok":           True,
+            "host":         mcp_server.MCP_HOST,
+            "port":         mcp_server.MCP_PORT,
+            "url":          f"http://{mcp_server.MCP_HOST}:{mcp_server.MCP_PORT}/mcp",
+            "tools":        [t["name"] for t in mcp_server.TOOLS],
+            "config_block": mcp_server.claude_desktop_config_block(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
 @app.route("/api/thumbnail")
 def api_thumbnail():
     """Extract a single frame from a project video as a JPEG. Cached on disk
@@ -2764,6 +2795,22 @@ def _bootstrap():
     # Auto-disable when MOTIONCUT_NO_AUTOPULL is set OR there's no .git.
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("WERKZEUG_RUN_MAIN"):
         start_auto_pull()
+    # MCP server for Claude Desktop / Cursor / Codex. Local-only; on hosted
+    # deploys it still binds to 127.0.0.1 so nothing external can reach it.
+    # Disable with MOTIONCUT_NO_MCP=1 (useful in tests or when port is taken).
+    if not os.environ.get("MOTIONCUT_NO_MCP"):
+        try:
+            import mcp_server
+            if mcp_server.start_mcp_server():
+                cfg = json.dumps(mcp_server.claude_desktop_config_block(), indent=2)
+                print(f"[mcp] listening on http://{mcp_server.MCP_HOST}:{mcp_server.MCP_PORT}/mcp")
+                print(f"[mcp] {len(mcp_server.TOOLS)} tools: "
+                      + ", ".join(t["name"] for t in mcp_server.TOOLS))
+                print("[mcp] add this to ~/Library/Application Support/Claude/claude_desktop_config.json:")
+                for line in cfg.splitlines():
+                    print(f"[mcp]   {line}")
+        except Exception as e:
+            print(f"[mcp] failed to start: {e}", flush=True)
 
 
 _bootstrap()

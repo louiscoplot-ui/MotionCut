@@ -19,6 +19,7 @@
     </div>
     <div class="topbar-right">
       <a class="mode-link" href="/edit" title="Open the manual timeline editor">Timeline editor &rarr;</a>
+      <span class="mcp-badge" id="mcp-badge" title="Click to copy Claude Desktop config" data-state="unknown">MCP <span class="mcp-dot">&bull;</span></span>
       <span class="build-tag mono">build <span id="build-sha">{{ build_version }}</span></span>
     </div>
   </header>
@@ -244,5 +245,36 @@
   <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
   <!-- App logic — module so it can import the worker-bridge ES module -->
   <script type="module" src="{{ url_for('static', filename='js/generate.js') }}?v={{ build_version }}"></script>
+  <script>
+    (function () {
+      const badge = document.getElementById('mcp-badge');
+      if (!badge) return;
+      async function ping() {
+        try {
+          const r = await fetch('/api/mcp/info', { cache: 'no-store' });
+          if (!r.ok) throw new Error('http ' + r.status);
+          const j = await r.json();
+          badge.dataset.state = j.ok ? 'up' : 'down';
+          badge.dataset.url   = j.url || '';
+          badge.dataset.cfg   = JSON.stringify(j.config_block || {}, null, 2);
+          badge.title = j.ok
+            ? 'MCP server up at ' + j.url + ' — click to copy Claude Desktop config'
+            : 'MCP server unreachable';
+        } catch { badge.dataset.state = 'down'; }
+      }
+      badge.addEventListener('click', async () => {
+        const cfg = badge.dataset.cfg;
+        if (!cfg) return;
+        try {
+          await navigator.clipboard.writeText(cfg);
+          const prev = badge.textContent;
+          badge.textContent = 'Copied!';
+          setTimeout(() => { badge.innerHTML = 'MCP <span class="mcp-dot">&bull;</span>'; }, 1200);
+        } catch {}
+      });
+      ping();
+      setInterval(ping, 5000);
+    })();
+  </script>
 </body>
 </html>

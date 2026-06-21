@@ -159,6 +159,7 @@
 
   <div class="topbar-right">
     <a class="mode-link" href="/" title="Back to AI auto-edit">&larr; AI auto-edit</a>
+    <span class="mcp-badge" id="mcp-badge" title="Click to copy Claude Desktop config" data-state="unknown">MCP <span class="mcp-dot">&bull;</span></span>
     <div class="topbar-divider"></div>
     <button id="btn-undo"  class="ic-btn" title="Undo (⌘Z)" data-i18n-attr="title:topbar.undo"><i data-lucide="undo-2"></i></button>
     <button id="btn-redo"  class="ic-btn" title="Redo (⌘Y)" data-i18n-attr="title:topbar.redo"><i data-lucide="redo-2"></i></button>
@@ -602,5 +603,50 @@
 <script src="{{ url_for('static', filename='js/timeline.js')       }}?v={{ build_version }}"></script>
 <script src="{{ url_for('static', filename='js/editor.js')         }}?v={{ build_version }}"></script>
 <script>if (window.lucide) lucide.createIcons();</script>
+<script>
+  (function () {
+    const badge = document.getElementById('mcp-badge');
+    if (!badge) return;
+    let lastVersion = 0;
+    async function ping() {
+      try {
+        const r = await fetch('/api/mcp/info', { cache: 'no-store' });
+        if (!r.ok) throw new Error('http ' + r.status);
+        const j = await r.json();
+        badge.dataset.state = j.ok ? 'up' : 'down';
+        badge.dataset.cfg   = JSON.stringify(j.config_block || {}, null, 2);
+        badge.title = j.ok
+          ? 'MCP server up at ' + j.url + ' — click to copy Claude Desktop config'
+          : 'MCP server unreachable';
+      } catch { badge.dataset.state = 'down'; }
+    }
+    async function pollVersion() {
+      try {
+        const r = await fetch('/api/project/version', { cache: 'no-store' });
+        if (!r.ok) return;
+        const { version } = await r.json();
+        if (version > lastVersion && lastVersion > 0) {
+          if (window.MC && window.MC.editor && typeof window.MC.editor.reloadProject === 'function') {
+            window.MC.editor.reloadProject();
+          } else {
+            console.info('[mcp] project mutated externally; reload the page to see changes');
+          }
+        }
+        lastVersion = version;
+      } catch {}
+    }
+    badge.addEventListener('click', async () => {
+      const cfg = badge.dataset.cfg;
+      if (!cfg) return;
+      try {
+        await navigator.clipboard.writeText(cfg);
+        badge.textContent = 'Copied!';
+        setTimeout(() => { badge.innerHTML = 'MCP <span class="mcp-dot">&bull;</span>'; }, 1200);
+      } catch {}
+    });
+    ping(); setInterval(ping, 5000);
+    pollVersion(); setInterval(pollVersion, 2000);
+  })();
+</script>
 </body>
 </html>
