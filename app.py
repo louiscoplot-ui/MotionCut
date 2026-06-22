@@ -2596,10 +2596,32 @@ def api_generate_status(job_id):
     """Mirror of get_job() reshaped for the new UI's 4-step display.
     Maps internal run_export_job statuses ("queued","running","done","error")
     onto user-facing ones ("rendering","done","error") so the frontend
-    doesn't need to know about both worlds."""
+    doesn't need to know about both worlds.
+
+    If the job_id is unknown, we now return 200 with status='starting'
+    instead of 404. The Dockerfile runs gunicorn with --workers 1 so
+    legitimately created jobs MUST be in this worker's JOBS dict — if
+    they aren't, the worker was just restarted (rare) and we should let
+    the client keep polling instead of throwing a UI error toast. The
+    miss is logged so we can find these in Render's log stream."""
     job = get_job(job_id)
     if not job:
-        return jsonify({"error": "unknown job"}), 404
+        # Log enough context to debug from Render's log stream.
+        try:
+            with JOBS_LOCK:
+                known = sorted(JOBS.keys())[-10:]
+            print(f"[poll-miss] job_id={job_id!r} not found; "
+                  f"recent known job_ids (tail 10)={known}", flush=True)
+        except Exception:
+            pass
+        return jsonify({
+            "status":        "starting",
+            "progress":      0,
+            "eta_seconds":   60,
+            "error_message": None,
+            "segments":      [],
+            "_note":         "job not yet visible — polling will recover when the worker registers it",
+        })
     raw_status = job.get("status") or "queued"
     # run_export_job uses "running" once FFmpeg is invoked. From the
     # user's perspective that's still the "rendering" step.
@@ -2619,6 +2641,42 @@ def api_generate_status(job_id):
     if ui_status == "done" and job.get("output"):
         out["output_url"] = f"/exports/{job['output']}"
     return jsonify(out)
+
+
+@app.route("/api/debug/jobs")
+def api_debug_jobs():
+    """Returns enough state to debug 'polling failed' issues from a browser
+    tab without needing Render log access. Lists in-memory JOBS keys + a
+    snapshot of jobs.json on disk + mount info."""
+    try:
+        with JOBS_LOCK:
+            in_memory = {k: {"status": v.get("status"),
+                             "progress": v.get("progress"),
+                             "output": v.get("output"),
+                             "error": v.get("error_message") or v.get("error")}
+                         for k, v in JOBS.items()}
+        path = _jobs_file()
+        disk = None
+        disk_mtime = None
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    disk = list(json.load(f).keys())
+                disk_mtime = path.stat().st_mtime
+            except Exception as e:
+                disk = f"could not read: {e}"
+        return jsonify({
+            "in_memory_count": len(in_memory),
+            "in_memory":       in_memory,
+            "disk_path":       str(path),
+            "disk_exists":     path.exists(),
+            "disk_keys":       disk,
+            "disk_mtime":      disk_mtime,
+            "export_dir":      str(EXPORT_DIR),
+            "upload_dir":      str(UPLOAD_DIR),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # Catalogue of CC0 music tracks shipped under /static/audio/. One entry per

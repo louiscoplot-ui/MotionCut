@@ -477,14 +477,12 @@ import { WorkerBridge } from './worker-bridge.js';
 
   function pollStatus(jobId) {
     cancelPolling();
-    // Tolerate transient "unknown job" 404s for the first ~10s. Render
-    // runs multiple gunicorn workers behind a load balancer; the worker
-    // that issues a job_id writes to disk via _persist_jobs_unlocked,
-    // but a sibling worker handling the very next poll may take a beat
-    // to see the file. Treating early 404s as "still queuing" instead
-    // of screaming at the user removes the race-window false alarm.
+    // Tolerate transient 404s and network blips: the backend now returns
+    // 200 + status='starting' for unknown job_ids (jobs.json sync window,
+    // worker restart, etc.) so the only way we hit the catch is a real
+    // network error. Count those too — toast only after sustained failures.
     let consecutiveFailures = 0;
-    const MAX_TRANSIENT_FAILURES = 6;   // ~12s at 2s interval
+    const MAX_TRANSIENT_FAILURES = 6;
     const tick = async () => {
       try {
         const r = await fetch(`/api/generate/${encodeURIComponent(jobId)}/status`);
@@ -492,23 +490,19 @@ import { WorkerBridge } from './worker-bridge.js';
         let s; try { s = JSON.parse(txt); } catch {
           throw new Error(`status HTTP ${r.status}: ${txt.slice(0,160) || '(empty)'}`);
         }
-        if (r.status === 404 && /unknown job/i.test(s.error || '')) {
-          consecutiveFailures += 1;
-          if (consecutiveFailures < MAX_TRANSIENT_FAILURES) {
-            console.info(`[poll] unknown job (attempt ${consecutiveFailures}/${MAX_TRANSIENT_FAILURES}) — race window, retrying`);
-            return;
-          }
-          throw new Error('job tracker lost the job (multi-worker sync issue)');
-        }
         if (!r.ok) throw new Error(s.error || `status HTTP ${r.status}`);
         consecutiveFailures = 0;
         handleStatus(s);
       } catch (e) {
-        console.warn('[poll]', e);
-        toast('Polling failed: ' + e.message, {kind:'error'});
+        consecutiveFailures += 1;
+        console.warn(`[poll] failure ${consecutiveFailures}/${MAX_TRANSIENT_FAILURES}:`, e);
+        if (consecutiveFailures >= MAX_TRANSIENT_FAILURES) {
+          toast('Polling failed: ' + e.message + ' (open /api/debug/jobs in a new tab to inspect)', {kind:'error', duration:10000});
+          consecutiveFailures = 0;   // reset so we don't spam
+        }
       }
     };
-    tick();   // immediate first hit
+    tick();
     pollTimer = setInterval(tick, 2000);
   }
   function cancelPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
