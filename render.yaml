@@ -7,8 +7,9 @@ services:
   - type: web
     name: motioncut
     runtime: docker
-    # Branch tracked for auto-deploy. Change this if you ever rename it.
-    branch: claude/motioncut-video-editor-nZFMP
+    # Branch tracked for auto-deploy. Main is the canonical branch since
+    # the wizard pivot + jobs-persist + MCP + ui-premium consolidation.
+    branch: main
     plan: starter            # cheapest tier that supports a persistent disk
     autoDeploy: true         # redeploy on every push to the branch above
     healthCheckPath: /api/health
