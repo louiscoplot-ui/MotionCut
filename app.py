@@ -171,6 +171,23 @@ def project_display_name(pid):
     return name.replace("_", " ") or pid
 
 
+_UUID_PREFIX_RE = re.compile(r"^[a-f0-9]{6,16}_(.+)$")
+
+
+def find_duplicate_upload(out_dir, original_safe_name):
+    """If a file already in out_dir has the same original name (after the
+    uuid prefix), return its filename. Used by the upload endpoints to
+    avoid building up duplicate copies when the user re-uploads the same
+    file (e.g. during a render the previous job was blocking)."""
+    for existing in out_dir.iterdir():
+        if not existing.is_file() or existing.name.startswith("."):
+            continue
+        m = _UUID_PREFIX_RE.match(existing.name)
+        if m and m.group(1) == original_safe_name:
+            return existing.name
+    return None
+
+
 def list_projects():
     out = []
     for p in sorted(UPLOAD_DIR.iterdir(), key=lambda x: x.name, reverse=True):
@@ -691,8 +708,25 @@ def upload():
     project = request.form.get("project") or "default"
     out_dir = project_dir(project)
 
+    original_safe = safe_name(f.filename)
+    if not heic_convert:
+        dupe = find_duplicate_upload(out_dir, original_safe)
+        if dupe:
+            dupe_path = out_dir / dupe
+            return jsonify({
+                "ok":        True,
+                "id":        dupe.split("_", 1)[0],
+                "project":   safe_project_id(project),
+                "filename":  dupe,
+                "kind":      kind,
+                "url":       url_for("serve_project_file", project=safe_project_id(project), filename=dupe),
+                "duration":  None,
+                "size":      dupe_path.stat().st_size,
+                "duplicate": True,
+            })
+
     fid = uuid.uuid4().hex[:12]
-    fname = f"{fid}_{safe_name(f.filename)}"
+    fname = f"{fid}_{original_safe}"
     out_path = out_dir / fname
     f.save(str(out_path))
 
@@ -807,8 +841,26 @@ def upload_chunk():
     project = request.form.get("project") or "default"
     out_dir = project_dir(project)
 
+    original_safe = safe_name(filename)
+    dupe = find_duplicate_upload(out_dir, original_safe)
+    if dupe:
+        for i in range(total):
+            (TMP_DIR / f"{upload_id}.chunk.{i:06d}").unlink(missing_ok=True)
+        dupe_path = out_dir / dupe
+        return jsonify({
+            "ok":        True,
+            "id":        dupe.split("_", 1)[0],
+            "project":   safe_project_id(project),
+            "filename":  dupe,
+            "kind":      kind,
+            "url":       url_for("serve_project_file", project=safe_project_id(project), filename=dupe),
+            "duration":  None,
+            "size":      dupe_path.stat().st_size,
+            "duplicate": True,
+        })
+
     fid = uuid.uuid4().hex[:12]
-    fname = f"{fid}_{safe_name(filename)}"
+    fname = f"{fid}_{original_safe}"
     out_path = out_dir / fname
 
     with open(out_path, "wb") as out_f:

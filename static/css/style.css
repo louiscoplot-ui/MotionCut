@@ -514,8 +514,41 @@ aside.right-rail { position: relative; }
   flex-shrink: 0;
   height: 220px;
   min-height: 160px;
-  resize: vertical;
   overflow: hidden;
+}
+
+/* Draggable splitter between preview (.stage-wrap) and timeline. */
+.vsplit {
+  flex-shrink: 0;
+  height: 8px;
+  margin: -2px 0;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border-radius: 4px;
+  transition: background 0.15s;
+  user-select: none;
+  touch-action: none;
+}
+.vsplit:hover,
+.vsplit.is-dragging,
+.vsplit:focus-visible {
+  background: var(--line-2);
+  outline: none;
+}
+.vsplit-grip {
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-2);
+  transition: background 0.15s;
+}
+.vsplit:hover .vsplit-grip,
+.vsplit.is-dragging .vsplit-grip,
+.vsplit:focus-visible .vsplit-grip {
+  background: var(--gold);
 }
 .tl {
   display: flex; flex-direction: column;
@@ -685,6 +718,27 @@ aside.right-rail { position: relative; }
 .tl-clip.clip-segment .tl-clip-name,
 .tl-clip.clip-segment .tl-clip-dur { color: #ffffff !important; }
 .tl-clip.clip-segment [data-lucide] { color: #ffffff; }
+
+/* Thumbnail background — keep the colored side-stripe (border-left) and
+   overlay a darkening gradient so filename/duration stay legible on any
+   frame. The track-color tints through as a semi-transparent layer. */
+.tl-clip.clip-segment.has-thumb {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  position: relative;
+}
+.tl-clip.clip-segment.has-thumb::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg,
+    rgba(0,0,0,0.15) 0%,
+    rgba(0,0,0,0.55) 100%);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+}
+.tl-clip.clip-segment.has-thumb > * { position: relative; z-index: 1; }
 /* Multi-track: each clip lives in its own .tl-row (track row). The
    row is absolutely positioned inside the parent .tl-track, and the
    .tl-clip blocks inside it are positioned relative to the row. */

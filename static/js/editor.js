@@ -4004,6 +4004,63 @@ function bindRightRailResize() {
   });
 }
 
+function bindStageVsplit() {
+  const handle = $('stage-vsplit');
+  const host = $('timeline-host');
+  if (!handle || !host) return;
+  const DEFAULT = 220, MIN = 120, MAX_RATIO = 0.7;
+  const clamp = (h) => {
+    const col = host.parentElement;
+    const colH = col ? col.clientHeight : window.innerHeight;
+    const max = Math.max(MIN + 60, Math.floor(colH * MAX_RATIO));
+    return Math.max(MIN, Math.min(max, h));
+  };
+  const apply = (h) => { host.style.height = `${h}px`; };
+  let saved = parseInt(localStorage.getItem('mc-timeline-h') || DEFAULT, 10);
+  if (!Number.isFinite(saved)) saved = DEFAULT;
+  apply(clamp(saved));
+  let dragging = false, startY = 0, startH = saved;
+  const onDown = (clientY) => {
+    dragging = true;
+    startY = clientY;
+    startH = host.getBoundingClientRect().height;
+    handle.classList.add('is-dragging');
+    document.body.style.cursor = 'ns-resize';
+  };
+  const onMove = (clientY) => {
+    if (!dragging) return;
+    const next = clamp(startH - (clientY - startY));
+    saved = next;
+    apply(next);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    try { localStorage.setItem('mc-timeline-h', String(saved)); } catch {}
+  };
+  handle.addEventListener('mousedown', (e) => { onDown(e.clientY); e.preventDefault(); });
+  window.addEventListener('mousemove', (e) => onMove(e.clientY));
+  window.addEventListener('mouseup', onUp);
+  handle.addEventListener('touchstart', (e) => { if (e.touches[0]) { onDown(e.touches[0].clientY); e.preventDefault(); } }, { passive: false });
+  window.addEventListener('touchmove', (e) => { if (e.touches[0]) onMove(e.touches[0].clientY); }, { passive: true });
+  window.addEventListener('touchend', onUp);
+  handle.addEventListener('dblclick', () => {
+    saved = DEFAULT;
+    apply(clamp(DEFAULT));
+    try { localStorage.setItem('mc-timeline-h', String(DEFAULT)); } catch {}
+  });
+  handle.addEventListener('keydown', (e) => {
+    const step = e.shiftKey ? 40 : 8;
+    if (e.key === 'ArrowUp')   { saved = clamp(saved + step); apply(saved); e.preventDefault(); }
+    if (e.key === 'ArrowDown') { saved = clamp(saved - step); apply(saved); e.preventDefault(); }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      try { localStorage.setItem('mc-timeline-h', String(saved)); } catch {}
+    }
+  });
+}
+
 function bindMediaTabs() {
   // Tab pills swap which media-pane is visible. The tab name doesn't have
   // to map 1:1 to a kind (e.g. Photo and Logo both upload images), the JS
@@ -4573,6 +4630,7 @@ function init() {
   bindDropzone('dropzone-audio', 'file-audio', 'audio');
   bindMediaTabs();
   bindRightRailResize();
+  bindStageVsplit();
   $('stage-empty-pick')?.addEventListener('click', () => $('file-video').click());
 
   // Add layer buttons

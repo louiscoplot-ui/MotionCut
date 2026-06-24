@@ -255,6 +255,7 @@ function renderVideoTrack(dur) {
       }
     }
   }
+  const project = api?.state?.project || 'default';
   tr.innerHTML = trackIds.map((trackId, rowIdx) => {
     const rowSegs = segs.filter(s => (+s.track || 0) === trackId);
     const blocks = rowSegs.map(s => {
@@ -264,12 +265,18 @@ function renderVideoTrack(dur) {
       const act  = (s.id === api.state.activeSegmentId)   ? 'is-active'   : '';
       const colorClass = `clip-c${trackId % COLOR_COUNT}`;
       const display = (s.filename || 'clip').replace(/^[a-f0-9]{6,16}_/, '').slice(0, 32);
+      const thumbSrc = (s.kind === 'image' && s.url)
+        ? s.url
+        : (s.filename
+            ? `/api/thumbnail?project=${encodeURIComponent(project)}&filename=${encodeURIComponent(s.filename)}`
+            : '');
+      const thumbStyle = thumbSrc ? `background-image:url('${thumbSrc}')` : '';
       return `
-        <div class="tl-clip clip-segment ${colorClass} ${sel} ${act}"
+        <div class="tl-clip clip-segment has-thumb ${colorClass} ${sel} ${act}"
              data-seg-id="${escapeHTML(s.id)}"
              data-kind="${escapeHTML(s.kind || 'video')}"
              data-track="${trackId}"
-             style="left:${left}px;width:${w}px">
+             style="left:${left}px;width:${w}px;${thumbStyle}">
           <span class="tl-trim tl-trim-left"  data-trim="left"></span>
           <i data-lucide="${s.kind === 'image' ? 'image' : 'film'}"></i>
           <span class="tl-clip-name">${escapeHTML(display)}</span>

@@ -19,6 +19,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -26,7 +27,14 @@ import uuid
 from flask import Flask, request, jsonify
 from werkzeug.serving import make_server
 
-import app as motioncut_app
+# When app.py is launched directly (`python app.py`) it lives under the
+# `__main__` module, and a plain `import app` re-executes app.py — the second
+# copy then re-imports mcp_server, which is the circular-import warning. Reuse
+# whatever's already loaded instead; only fall back to a real import in the
+# WSGI/gunicorn path where `app` is the entry-point module.
+motioncut_app = sys.modules.get("app") or sys.modules.get("__main__")
+if motioncut_app is None or not hasattr(motioncut_app, "safe_project_id"):
+    import app as motioncut_app  # noqa: F401
 
 MCP_PORT = int(os.environ.get("MOTIONCUT_MCP_PORT", "19790"))
 MCP_HOST = os.environ.get("MOTIONCUT_MCP_HOST", "127.0.0.1")
