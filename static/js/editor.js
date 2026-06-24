@@ -792,57 +792,84 @@ function applyMusic(meta) {
   detectBeats(meta.url);
 }
 
+// CORE-3: beat detection runs in analysis.worker.js (off the main thread) so
+// the UI stays responsive on long tracks. Web Audio decode is native/async
+// and unavoidable on the main thread; the heavy energy/flux scan — the part
+// that actually blocks — is shipped to the worker. Falls back to the
+// in-thread scan if the worker bridge is unavailable or errors.
 async function detectBeats(url) {
   try {
     toast('Detecting beats…', { ms: 60000 });
     const buf = await fetch(url).then(r => r.arrayBuffer());
     const ac = new (window.AudioContext || window.webkitAudioContext)();
     const decoded = await ac.decodeAudioData(buf);
-    const ch = decoded.getChannelData(0);
     const sr = decoded.sampleRate;
-    // Energy onset: frame the signal in 1024-sample windows, compute energy,
-    // detect local maxima above adaptive threshold.
-    const win = 1024;
-    const hop = 512;
-    const frames = Math.floor((ch.length - win) / hop);
-    const energy = new Float32Array(frames);
-    for (let i = 0; i < frames; i++) {
-      let e = 0;
-      const start = i * hop;
-      for (let j = 0; j < win; j++) {
-        const v = ch[start + j];
-        e += v * v;
-      }
-      energy[i] = Math.sqrt(e / win);
-    }
-    // Smooth + flux
-    const flux = new Float32Array(frames);
-    for (let i = 1; i < frames; i++) {
-      flux[i] = Math.max(0, energy[i] - energy[i-1] * 1.05);
-    }
-    // Adaptive threshold via local mean
-    const beats = [];
-    const localWin = 24;     // ~0.55 s
-    const minGapFrames = Math.floor(0.30 * sr / hop);  // 300ms minimum between beats
-    let lastBeat = -minGapFrames;
-    for (let i = localWin; i < frames - localWin; i++) {
-      let mean = 0;
-      for (let k = i - localWin; k < i + localWin; k++) mean += flux[k];
-      mean /= (localWin * 2);
-      const thresh = mean * 1.6 + 0.005;
-      if (flux[i] > thresh && flux[i] >= flux[i-1] && flux[i] >= flux[i+1] && (i - lastBeat) >= minGapFrames) {
-        beats.push((i * hop) / sr);
-        lastBeat = i;
-      }
-    }
-    state.beats = beats;
+    let pcm = decoded.getChannelData(0).slice();   // own copy (transferable)
     try { ac.close(); } catch {}
-    toast(`Detected ${beats.length} beats`, { gold:true });
+
+    const WB = window.MC?.WorkerBridge;
+    if (WB) {
+      const bridge = new WB('/static/js/workers/analysis.worker.js');
+      bridge.on(m => { if (m && m.type === 'WAVEFORM_READY') state.waveform = m.waveform; });
+      bridge.send('ANALYSE_PCM', { pcm, sampleRate: sr }, [pcm.buffer]);
+      const res = await bridge.wait(m => m.type === 'BEATS_READY', { timeout: 120000 });
+      bridge.terminate();
+      if (res.fallback) state.beats = _detectBeatsInThread(decoded.getChannelData(0), sr);
+      else state.beats = res.beats || [];
+      if (res.bpm) state.bpm = res.bpm;
+    } else {
+      state.beats = _detectBeatsInThread(pcm, sr);
+    }
+
+    toast(`Detected ${state.beats.length} beats`, { gold:true });
     try { window.MC?.timeline?.render?.(); } catch {}
+    persistBeats(state.beats, state.bpm);
   } catch (e) {
     console.warn('[beats]', e);
     toast('Beat detection failed');
   }
+}
+
+// Energy-onset beat scan: frame in 1024-sample windows, compute RMS energy,
+// take positive flux, threshold against a local mean. Kept as the worker
+// fallback path.
+function _detectBeatsInThread(ch, sr) {
+  const win = 1024, hop = 512;
+  const frames = Math.max(0, Math.floor((ch.length - win) / hop));
+  const energy = new Float32Array(frames);
+  for (let i = 0; i < frames; i++) {
+    let e = 0; const start = i * hop;
+    for (let j = 0; j < win; j++) { const v = ch[start + j]; e += v * v; }
+    energy[i] = Math.sqrt(e / win);
+  }
+  const flux = new Float32Array(frames);
+  for (let i = 1; i < frames; i++) flux[i] = Math.max(0, energy[i] - energy[i-1] * 1.05);
+  const beats = [];
+  const localWin = 24;
+  const minGapFrames = Math.floor(0.30 * sr / hop);
+  let lastBeat = -minGapFrames;
+  for (let i = localWin; i < frames - localWin; i++) {
+    let mean = 0;
+    for (let k = i - localWin; k < i + localWin; k++) mean += flux[k];
+    mean /= (localWin * 2);
+    const thresh = mean * 1.6 + 0.005;
+    if (flux[i] > thresh && flux[i] >= flux[i-1] && flux[i] >= flux[i+1] && (i - lastBeat) >= minGapFrames) {
+      beats.push((i * hop) / sr);
+      lastBeat = i;
+    }
+  }
+  return beats;
+}
+
+// Persist beats to the project doc's audio.beat_anchors so the render
+// pipeline's beat-snap step (run_pipeline) can reuse them without re-analysis.
+function persistBeats(beats, bpm) {
+  try {
+    fetch('/api/project/audio', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: state.project, beats: beats || [], bpm: bpm || null }),
+    }).catch(() => {});
+  } catch {}
 }
 
 // ============================================================

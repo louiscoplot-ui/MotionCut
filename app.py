@@ -435,6 +435,28 @@ def api_project_version():
         return jsonify({"version": 0, "active_project": "default"})
 
 
+@app.route("/api/project/audio", methods=["POST"])
+def api_project_audio():
+    """CORE-3: persist detected beats into the project doc's audio.beat_anchors
+    so the render pipeline's beat-snap step (run_pipeline) can reuse them
+    without re-analysis. The frontend posts this after the analysis worker
+    returns BEATS_READY."""
+    data = request.get_json(force=True, silent=True) or {}
+    pid = safe_project_id(data.get("project") or "default")
+    beats = data.get("beats") or []
+    bpm = data.get("bpm")
+    anchors = [round(float(b), 3) for b in beats if isinstance(b, (int, float))]
+    with _doc_lock(pid):
+        doc = _read_doc(pid) or _minimal_doc(pid)
+        audio = doc.setdefault("audio", {})
+        audio["beat_anchors"] = anchors
+        if bpm:
+            audio["bpm"] = bpm
+        doc["modified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_doc_atomic(pid, doc)
+    return jsonify({"ok": True, "beat_count": len(anchors)})
+
+
 @app.route("/api/mcp/info")
 def api_mcp_info():
     """Used by the topbar badge to detect whether the local MCP server is

@@ -598,10 +598,23 @@
 <!-- ?v=<git-sha> defeats stale browser caches when the user pulls a new
      build. The Flask side already sends Cache-Control:no-store on /static,
      but a query-string bust is belt-and-braces for misconfigured proxies. -->
+<!-- Expose the ES-module WorkerBridge to the classic scripts below as
+     window.MC.WorkerBridge. Module scripts run after parsing but before
+     DOMContentLoaded, so it is available by the time editor.js init() runs
+     and well before any user-triggered worker call. -->
+<script type="module">
+  import { WorkerBridge } from "{{ url_for('static', filename='js/worker-bridge.js') }}?v={{ build_version }}";
+  window.MC = window.MC || {};
+  window.MC.WorkerBridge = WorkerBridge;
+</script>
 <script src="{{ url_for('static', filename='js/project-state.js') }}?v={{ build_version }}"></script>
 <script src="{{ url_for('static', filename='js/motion.js')         }}?v={{ build_version }}"></script>
 <script src="{{ url_for('static', filename='js/timeline.js')       }}?v={{ build_version }}"></script>
 <script src="{{ url_for('static', filename='js/editor.js')         }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/captions.js')       }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/face-detect.js')    }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/shot-classify.js')  }}?v={{ build_version }}"></script>
+<script src="{{ url_for('static', filename='js/re-workflow.js')    }}?v={{ build_version }}"></script>
 <script>if (window.lucide) lucide.createIcons();</script>
 <script>
   (function () {
