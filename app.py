@@ -3114,8 +3114,9 @@ def api_export_start():
     out_name = f"export_{uuid.uuid4().hex[:12]}.mp4"
     out_path = EXPORT_DIR / out_name
     try:
-        from export import ffmpeg_export
-        job_id, est = ffmpeg_export.start_export(segments, resolution, out_path)
+        from export import export_loop
+        job_id, est = export_loop.start_export_with_verification(
+            segments, resolution, out_path, body.get("export") or {})
     except RuntimeError as e:
         if str(e) == "busy":
             return jsonify({"error": "an export is already running"}), 429
