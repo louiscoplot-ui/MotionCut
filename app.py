@@ -3016,6 +3016,96 @@ def api_stream(job_id):
     return Response(gen(), mimetype="text/event-stream")
 
 
+# ---- CORE-2 / LOOP-2: standalone export path ------------------------------
+# Additive routes that own a clean FFmpeg builder (export/ffmpeg_export.py)
+# and the quality-verification loop (export/export_loop.py). They do NOT
+# touch run_export_job/build_filter_complex/build_segments_chain. The
+# editor UI still uses POST /api/export; these satisfy the spec's
+# /api/export/start contract and give the quality loop a render path.
+
+def _resolve_export_segments(pid, body):
+    """Build [{path, sourceIn, sourceOut, has_audio}] from the request body's
+    segments[], or fall back to every uploaded video in the project at full
+    length. Paths are validated through safe_name."""
+    pdir = project_dir(pid)
+    out = []
+    segs = body.get("segments") or []
+    if segs:
+        for s in segs:
+            fn = s.get("clipFilename") or s.get("filename")
+            if not fn:
+                continue
+            p = pdir / safe_name(fn)
+            if not p.exists():
+                continue
+            out.append({
+                "path":      str(p),
+                "sourceIn":  float(s.get("sourceIn", 0)),
+                "sourceOut": float(s.get("sourceOut", 0)) or probe_duration(p),
+                "has_audio": bool(s.get("has_audio", True)),
+            })
+        return out
+    if pdir.exists():
+        for p in sorted(pdir.iterdir()):
+            if p.name.startswith(".") or p.name == DOC_FILENAME:
+                continue
+            if p.suffix.lower() in ALLOWED_VIDEO:
+                dur = probe_duration(p) or 5.0
+                out.append({"path": str(p), "sourceIn": 0.0,
+                            "sourceOut": dur, "has_audio": True})
+    return out
+
+
+@app.route("/api/export/start", methods=["POST"])
+def api_export_start():
+    body = request.get_json(force=True, silent=True) or {}
+    pid = safe_project_id(body.get("project") or "default")
+    resolution = body.get("resolution") or "1080p"
+    segments = _resolve_export_segments(pid, body)
+    if not segments:
+        return jsonify({"error": "no clips to export"}), 400
+
+    out_name = f"export_{uuid.uuid4().hex[:12]}.mp4"
+    out_path = EXPORT_DIR / out_name
+    try:
+        from export import ffmpeg_export
+        job_id, est = ffmpeg_export.start_export(segments, resolution, out_path)
+    except RuntimeError as e:
+        if str(e) == "busy":
+            return jsonify({"error": "an export is already running"}), 429
+        if str(e) == "ffmpeg-missing":
+            return jsonify({"error": "FFmpeg not installed"}), 503
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"job_id": job_id, "estimated_duration_s": est})
+
+
+@app.route("/api/export/status/<job_id>")
+def api_export_start_status(job_id):
+    from export import ffmpeg_export
+    job = ffmpeg_export.get_job(job_id)
+    if not job:
+        return jsonify({"status": "error", "error": "unknown job"}), 404
+    return jsonify({
+        "status":         job.get("status"),
+        "progress_pct":   job.get("progress_pct", 0),
+        "output_path":    job.get("output_path"),
+        "attempts":       job.get("attempts", 1),
+        "quality_check":  job.get("quality_check"),
+        "quality_warning": job.get("quality_warning"),
+        "error":          job.get("error"),
+    })
+
+
+@app.route("/api/export/download/<job_id>")
+def api_export_download(job_id):
+    from export import ffmpeg_export
+    job = ffmpeg_export.get_job(job_id)
+    if not job or job.get("status") != "done" or not job.get("output_path"):
+        return jsonify({"error": "export not ready"}), 404
+    p = Path(job["output_path"])
+    return send_from_directory(str(p.parent), p.name, as_attachment=True)
+
+
 @app.errorhandler(413)
 def too_large(_e):
     return jsonify({"error": "file too large (limit 2GB)"}), 413
