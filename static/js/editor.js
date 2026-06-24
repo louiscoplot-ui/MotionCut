@@ -4325,6 +4325,59 @@ function duplicateSelected() {
 }
 
 // ============================================================
+//  J/K/L shuttle (Premiere-style transport) — CORE-1
+//  Browsers don't support reliable negative playbackRate, so reverse
+//  is emulated with a stepping interval. K stops everything.
+// ============================================================
+const _shuttle = { dir: 0, rate: 1, timer: null };
+function _stopShuttle() {
+  if (_shuttle.timer) { clearInterval(_shuttle.timer); _shuttle.timer = null; }
+  _shuttle.dir = 0; _shuttle.rate = 1;
+  try { video.playbackRate = 1; } catch {}
+}
+function shuttle(dir) {
+  if (!video) return;
+  if (dir === 0) { _stopShuttle(); try { video.pause(); } catch {} return; }
+  if (dir === 1) {
+    if (_shuttle.timer) { clearInterval(_shuttle.timer); _shuttle.timer = null; }
+    _shuttle.rate = (_shuttle.dir === 1) ? Math.min(4, _shuttle.rate + 0.5) : 1;
+    _shuttle.dir = 1;
+    try { video.playbackRate = _shuttle.rate; video.play()?.catch(() => {}); } catch {}
+    return;
+  }
+  // dir === -1 : reverse via stepping (pause real playback first)
+  try { video.pause(); } catch {}
+  _shuttle.rate = (_shuttle.dir === -1) ? Math.min(4, _shuttle.rate + 0.5) : 1;
+  _shuttle.dir = -1;
+  if (_shuttle.timer) clearInterval(_shuttle.timer);
+  const step = _shuttle.rate / 30;            // seconds per tick at ~30Hz
+  _shuttle.timer = setInterval(() => {
+    const t = (video.currentTime || 0) - step;
+    if (t <= 0) { video.currentTime = 0; _stopShuttle(); return; }
+    video.currentTime = t;
+  }, 33);
+}
+
+// Delete the selected timeline segment if one is focused, otherwise fall
+// back to layer deletion. Segments are the CORE-1 edit unit; layers are
+// overlays. Either can be the active selection.
+function deleteSelectedOrSegment() {
+  if (state.selectedSegmentId && (!state.selectedIds || !state.selectedIds.size) && !state.selectedId) {
+    const id = state.selectedSegmentId;
+    state.selectedSegmentId = null;
+    api_removeSegment(id);
+    return;
+  }
+  deleteSelected();
+}
+function api_removeSegment(id) {
+  // removeSegment is defined in the segment section; guard for load order.
+  if (typeof removeSegment === 'function') removeSegment(id);
+  try { window.MC?.timeline?.render?.(); } catch {}
+  try { window.MC?.project?.save?.(state); } catch {}
+}
+
+// ============================================================
 //  Keyboard
 // ============================================================
 function onKey(e) {
@@ -4341,16 +4394,19 @@ function onKey(e) {
   else if (e.key === 'ArrowRight')  { video.currentTime = Math.min(video.duration||0, video.currentTime + 1/30); }
   else if (e.key === '-' || e.key === '_') { video.currentTime = Math.max(0, video.currentTime - 1/30); }
   else if (e.key === '+' || e.key === '=') { video.currentTime = Math.min(video.duration||0, video.currentTime + 1/30); }
-  else if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelectedOrSegment(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelected(); }
   else if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAll(); }
   else if (e.key === 'i' || e.key === 'I') { setInMark(); }
   else if (e.key === 'o' || e.key === 'O') { setOutMark(); }
+  // J/K/L Premiere-style shuttle (CORE-1). 'L' was previously the logo
+  // picker; logo is still reachable via the toolbar button + Cmd+K palette.
+  else if (e.key === 'j' || e.key === 'J') { shuttle(-1); }
+  else if (e.key === 'k' || e.key === 'K') { shuttle(0); }
+  else if (e.key === 'l' || e.key === 'L') { shuttle(1); }
   else if (e.key.toLowerCase() === 't') { addTextQuick(); }
-  else if (e.key.toLowerCase() === 'l') { $('file-image').click(); }
-  else if (e.key.toLowerCase() === 'o') { addColorQuick(); }
 }
 
 // ============================================================
