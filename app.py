@@ -453,6 +453,35 @@ def api_mcp_info():
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
+@app.route("/api/mcp/instruct", methods=["POST"])
+def api_mcp_instruct():
+    """Drive the editor from one natural-language instruction. Runs the
+    Observe -> Plan -> Execute -> Verify loop on a background thread and
+    returns a task_id to poll via /api/mcp/status/<task_id>."""
+    body = request.get_json(force=True, silent=True) or {}
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        return jsonify({"error": "instruction is required"}), 400
+    try:
+        import agent_loop
+        task_id = agent_loop.start_instruction(instruction, project=body.get("project"))
+        return jsonify({"task_id": task_id, "status": "running"}), 202
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mcp/status/<task_id>")
+def api_mcp_status(task_id):
+    try:
+        import agent_loop
+        task = agent_loop.get_task(task_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not task:
+        return jsonify({"status": "unknown", "error": "no task with that id"}), 404
+    return jsonify(task)
+
+
 @app.route("/api/thumbnail")
 def api_thumbnail():
     """Extract a single frame from a project video as a JPEG. Cached on disk
