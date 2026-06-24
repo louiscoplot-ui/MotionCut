@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "runs": [
+    {
+      "id": "20260624_051305",
+      "mode": "audit",
+      "online": false,
+      "timestamp": "2026-06-24T05:13:05.709947",
+      "bugs_found": 0,
+      "patches_generated": 0
+    },
+    {
+      "id": "20260624_051335",
+      "mode": "full",
+      "online": false,
+      "timestamp": "2026-06-24T05:13:35.644207",
+      "bugs_found": 0,
+      "patches_generated": 0
+    }
+  ],
+  "known_bugs": [],
+  "fixed_bugs": [],
+  "agent_scores": {
+    "1": {
+      "scores": {
+        "bug_hunter": {
+          "score": 4.0,
+          "strengths": [
+            "scan deterministe, ids stables"
+          ],
+          "weaknesses": [
+            "couverture limitee sans LLM"
+          ]
+        },
+        "code_fixer": {
+          "score": 3.0,
+          "strengths": [
+            "garde-fous str-replace"
+          ],
+          "weaknesses": [
+            "Pas de patch auto en mode offline (pas de cle API)."
+          ]
+        },
+        "ai_integrator": {
+          "score": 6.0,
+          "strengths": [
+            "artefacts generes"
+          ],
+          "weaknesses": [
+            "validation prompt sautee (offline)"
+          ]
+        }
+      },
+      "global_score": 4.3,
+      "improvement_priority": [
+        "code_fixer",
+        "bug_hunter"
+      ],
+      "mode": "heuristic"
+    }
+  },
+  "best_prompts": {},
+  "patterns_learned": [],
+  "last_summary": {
+    "total_bugs": 0,
+    "blocking": 0,
+    "broken": 0,
+    "degraded": 0,
+    "silent": 0,
+    "top_3_priorities": []
+  },
+  "evolution_backlog": [
+    "code_fixer",
+    "bug_hunter"
+  ]
+}

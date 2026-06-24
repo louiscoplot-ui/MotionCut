@@ -481,6 +481,72 @@ def api_clip_ai_cache():
     return jsonify({"ok": True, "filename": filename, "ai_cache": entry})
 
 
+_AI_PLAN_SYSTEM_FALLBACK = (
+    "Tu es l'IA de montage video de MotionCut. Reponds UNIQUEMENT en JSON valide "
+    "(zero markdown). Schema: {\"segments\":[{\"clip_id\":str,\"start\":float,\"end\":float,"
+    "\"order\":int,\"transition\":\"cut|crossfade|fadein|fadeout\",\"transition_duration\":float,"
+    "\"overlays\":[],\"audio\":{\"mute_original\":bool,\"volume\":float}}],\"output\":{\"resolution\":str,"
+    "\"aspect_ratio\":\"16:9|9:16|1:1\",\"format\":\"mp4\",\"music_file\":null,\"music_volume\":float,"
+    "\"total_duration_target\":int}}. Regles: start<end, end-start>=1.0, ne reference que des clip_id "
+    "fournis, somme des durees proche de total_duration_target. 'immobilier' => drone_wide->exterior->"
+    "interior->detail->drone_outro."
+)
+
+
+def _ai_plan_system():
+    """Prefer the (possibly evolved) system prompt the AI Integrator wrote;
+    fall back to an inline default so the route works standalone."""
+    p = BASE_DIR / "agents" / "patches" / "ai_system_prompt.txt"
+    try:
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return _AI_PLAN_SYSTEM_FALLBACK
+
+
+@app.route("/api/ai/plan", methods=["POST"])
+def ai_generate_plan():
+    """Generate an EditPlan from a natural-language brief via Claude. Body:
+    {prompt: str, clips: [{id, filename, duration, metadata}]}. Returns
+    {plan} or a clear error. 503 when no key, 502 on API error. Clips are
+    filename-keyed in MotionCut, so clip_id == filename."""
+    data = request.get_json(silent=True) or {}
+    if "prompt" not in data or "clips" not in data:
+        return jsonify({"error": "prompt et clips requis"}), 400
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return jsonify({"error": "ANTHROPIC_API_KEY non configuree (.env)"}), 503
+    try:
+        import anthropic
+    except ImportError:
+        return jsonify({"error": "dependance 'anthropic' absente"}), 503
+
+    client = anthropic.Anthropic(api_key=key)
+    system = _ai_plan_system()
+    user = (f"Prompt utilisateur : {data['prompt']}\n\n"
+            f"Clips disponibles : {json.dumps(data['clips'], ensure_ascii=False)}")
+    for attempt in range(2):
+        try:
+            resp = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=2000,
+                system=system, messages=[{"role": "user", "content": user}])
+            plan = json.loads(resp.content[0].text.strip())
+            assert "segments" in plan and "output" in plan
+            for seg in plan["segments"]:
+                assert seg["end"] > seg["start"], "segment end <= start"
+                assert seg["end"] - seg["start"] >= 1.0, "segment < 1s"
+            return jsonify({"plan": plan,
+                            "explanation": f"{len(plan['segments'])} segments generes"})
+        except (json.JSONDecodeError, AssertionError) as e:
+            if attempt == 0:
+                user += f"\n\nTa reponse precedente etait invalide ({e}). JSON pur uniquement."
+                continue
+            return jsonify({"error": f"plan invalide apres 2 essais : {e}"}), 500
+        except Exception as e:
+            return jsonify({"error": f"erreur API Claude : {e}"}), 502
+
+
 @app.route("/api/mcp/info")
 def api_mcp_info():
     """Used by the topbar badge to detect whether the local MCP server is

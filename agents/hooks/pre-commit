@@ -1,0 +1,17 @@
+#!/bin/bash
+# MotionCut Agent — lightweight pre-commit audit.
+# Blocks the commit only when the report shows a NON-ZERO BLOCKING count.
+# Tolerant: if python or the agents error, it skips the gate (exit 0) rather
+# than blocking work. Install with `make install-hook`.
+echo "MotionCut Agent — pre-commit audit..."
+command -v python3 >/dev/null 2>&1 || { echo "  python3 not found — skipping"; exit 0; }
+python3 agents/run_agents.py --mode audit >/tmp/mc_agent_audit.log 2>&1 || {
+  echo "  agent audit errored — skipping gate"; exit 0; }
+tail -6 /tmp/mc_agent_audit.log
+if grep -qE "[1-9][0-9]* BLOCKING" agents/AGENT_REPORT.md 2>/dev/null; then
+  echo "  ⛔ BLOCKING bugs detected — see agents/AGENT_REPORT.md"
+  echo "     Override with: git commit --no-verify"
+  exit 1
+fi
+echo "  ✅ no BLOCKING bugs"
+exit 0

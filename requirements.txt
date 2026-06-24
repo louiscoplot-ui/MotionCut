@@ -4,3 +4,4 @@ Pillow>=10.0.0
 pillow-heif>=0.16.0  # optional HEIC support — server falls back to 415 if missing
 gunicorn>=21.2.0
 anthropic>=0.39.0  # optional — Plan step in agent_loop falls back to a heuristic planner if missing/unkeyed
+python-dotenv>=1.0.0  # loads .env for the agents/ system
