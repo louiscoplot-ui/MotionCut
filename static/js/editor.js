@@ -4352,6 +4352,44 @@ function duplicateSelected() {
 }
 
 // ============================================================
+//  ML-1: caption layers from a transcription. captions.js (the Whisper
+//  worker orchestrator) calls this so it never has to know the text-layer
+//  shape — positioning + defaults come from the real makeTextLayer factory.
+// ============================================================
+const CAPTION_PRESETS = {
+  minimal:   { fontFamily: 'Inter', fontSize: 48, fontWeight: 600, color: '#ffffff' },
+  bold:      { fontFamily: 'Syne',  fontSize: 64, fontWeight: 800, color: '#ffffff' },
+  cinematic: { fontFamily: 'Inter', fontSize: 52, fontWeight: 500, color: '#ffffff' },
+};
+function addCaptionLayers(segments, style = 'minimal') {
+  if (!Array.isArray(segments) || !segments.length) return 0;
+  const p = CAPTION_PRESETS[style] || CAPTION_PRESETS.minimal;
+  let added = 0;
+  for (const seg of segments) {
+    const text = (seg.text || '').trim();
+    if (!text) continue;
+    const start = +seg.start || 0;
+    const end = (+seg.end > start) ? +seg.end : start + 2;
+    state.layers.push(makeTextLayer({
+      text, name: 'Caption',
+      x: canvasW * 0.5, y: canvasH * 0.86,
+      width: canvasW * 0.8, height: 120,
+      align: 'center', start, end,
+      animation: 'fade', _caption: true, _captionStyle: style,
+      ...p,
+    }));
+    added++;
+  }
+  if (added) {
+    snapshot();
+    renderLayersPanel();
+    draw();
+    try { window.MC?.timeline?.render?.(); } catch {}
+  }
+  return added;
+}
+
+// ============================================================
 //  J/K/L shuttle (Premiere-style transport) — CORE-1
 //  Browsers don't support reliable negative playbackRate, so reverse
 //  is emulated with a stepping interval. K stops everything.
@@ -4475,6 +4513,9 @@ function init() {
     setInMark, setOutMark, clearMarks,
     selectAll, deleteSelected, duplicateSelected,
     detectBeats,
+    addCaptionLayers,
+    get canvasW() { return canvasW; },
+    get canvasH() { return canvasH; },
     // Segments / multi-clip surface — exposed so timeline.js (and any future
     // consumer) can mutate the timeline without depending on internal globals.
     appendSegment, removeSegment, segmentAt, activateSegment, reflowSegments,
