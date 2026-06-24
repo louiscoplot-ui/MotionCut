@@ -4389,6 +4389,35 @@ function addCaptionLayers(segments, style = 'minimal') {
   return added;
 }
 
+// RE-1: positioned overlay text layer (price tag / address / room name).
+// Position is a semantic anchor mapped to canvas coords; the layer is a real
+// text layer so it renders/exports through the normal drawtext path.
+const OVERLAY_POS = {
+  'top-left':      [0.16, 0.12, 'left'],
+  'top-right':     [0.84, 0.12, 'right'],
+  'bottom-center': [0.50, 0.86, 'center'],
+  'bottom-left':   [0.18, 0.86, 'left'],
+  'center':        [0.50, 0.50, 'center'],
+};
+function addOverlay(opts = {}) {
+  const { text = '', position = 'bottom-center', start = 0, end = 8,
+          fontSize = 52, color = '#ffffff', name = 'Overlay' } = opts;
+  const p = OVERLAY_POS[position] || OVERLAY_POS['bottom-center'];
+  const L = makeTextLayer({
+    text, name,
+    x: canvasW * p[0], y: canvasH * p[1], align: p[2],
+    width: canvasW * 0.6, height: 120,
+    fontSize, fontWeight: 700, color,
+    start, end, animation: 'fade', _overlay: true,
+  });
+  state.layers.push(L);
+  snapshot();
+  renderLayersPanel();
+  draw();
+  try { window.MC?.timeline?.render?.(); } catch {}
+  return L.id;
+}
+
 // ============================================================
 //  J/K/L shuttle (Premiere-style transport) — CORE-1
 //  Browsers don't support reliable negative playbackRate, so reverse
@@ -4514,6 +4543,7 @@ function init() {
     selectAll, deleteSelected, duplicateSelected,
     detectBeats,
     addCaptionLayers,
+    addOverlay,
     get canvasW() { return canvasW; },
     get canvasH() { return canvasH; },
     // Segments / multi-clip surface — exposed so timeline.js (and any future
