@@ -457,6 +457,30 @@ def api_project_audio():
     return jsonify({"ok": True, "beat_count": len(anchors)})
 
 
+@app.route("/api/clip/ai-cache", methods=["POST"])
+def api_clip_ai_cache():
+    """ML-2/ML-3: merge browser-computed analysis (has_face, face_center,
+    shot_type, shot_confidence, ...) into the project doc's ai_cache. Unlike
+    /api/clip/analyze (server-side FFmpeg), this persists results produced by
+    the in-browser MediaPipe / ONNX workers so they survive a reload and feed
+    the generate pipeline's clip_metadata."""
+    data = request.get_json(force=True, silent=True) or {}
+    pid = safe_project_id(data.get("projectId") or data.get("project") or "default")
+    filename = safe_name(data.get("filename") or "")
+    patch = data.get("ai_cache") or {}
+    if not filename or not isinstance(patch, dict):
+        return jsonify({"error": "filename and ai_cache required"}), 400
+    with _doc_lock(pid):
+        doc = _read_doc(pid) or _minimal_doc(pid)
+        cache = doc.setdefault("ai_cache", {})
+        entry = cache.get(filename) or {}
+        entry.update(patch)
+        cache[filename] = entry
+        doc["modified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_doc_atomic(pid, doc)
+    return jsonify({"ok": True, "filename": filename, "ai_cache": entry})
+
+
 @app.route("/api/mcp/info")
 def api_mcp_info():
     """Used by the topbar badge to detect whether the local MCP server is
