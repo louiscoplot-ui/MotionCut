@@ -1243,13 +1243,16 @@ def _ffmpeg_signalstats(path, debug=False, sample_every=3):
     motion     ∈ [0,1]  — mean YDIF (frame-to-frame luma change), normalized
                           empirically by /30 (sharp action ≈ 30, static ≈ 0.5)
     """
+    # -skip_frame nokey makes the decoder emit only keyframes, so a 4K clip
+    # decodes ~10 frames instead of ~400 — the decode (not the filter) was the
+    # bottleneck. brightness/motion are heuristic, so keyframe sampling is fine.
     cmd = [
-        FFMPEG, "-i", str(path),
-        "-vf", f"select='not(mod(n\\,{sample_every}))',scale=-2:240,signalstats,metadata=mode=print:file=-",
+        FFMPEG, "-skip_frame", "nokey", "-i", str(path),
+        "-vf", "scale=-2:240,signalstats,metadata=mode=print:file=-",
         "-an", "-f", "null", "-"
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
         return 0.5, 0.0, "" if not debug else "[timeout]"
     raw = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -1263,12 +1266,12 @@ def _ffmpeg_signalstats(path, debug=False, sample_every=3):
 def _ffmpeg_scene_cuts(path, threshold=0.4, debug=False):
     """Returns list of cut timestamps (seconds) where scene change > threshold."""
     cmd = [
-        FFMPEG, "-i", str(path),
+        FFMPEG, "-skip_frame", "nokey", "-i", str(path),
         "-vf", f"scale=-2:240,select='gt(scene\\,{threshold})',showinfo",
         "-an", "-f", "null", "-"
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
         return [], "" if not debug else "[timeout]"
     stderr = proc.stderr or ""
