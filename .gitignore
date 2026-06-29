@@ -7,3 +7,5 @@ package.json
 .env
 .env.local
 agents/__pycache__/
+agents/AGENT_REPORT.md
+agents/memory/agent_brain.json
