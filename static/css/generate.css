@@ -22,6 +22,9 @@
   --danger:      #d96d6d;
   --success:     #c9a84c;
 
+  /* Text that sits ON the gold accent — stays dark in both themes. */
+  --on-gold:     #0a0a0a;
+
   --r-1: 4px;
   --r-2: 8px;
   --r-3: 12px;
@@ -79,7 +82,7 @@ html, body {
   width: 32px; height: 32px;
   border-radius: 2px;
   background: var(--gold);
-  color: var(--bg);
+  color: var(--on-gold);
   font-weight: 600; font-size: 18px;
   display: inline-flex; align-items: center; justify-content: center;
   font-family: 'Playfair Display', serif;
@@ -251,11 +254,11 @@ html, body {
   text-transform: uppercase;
   padding: 3px 8px;
   border-radius: 2px;
-  color: var(--bg);
+  color: var(--on-gold);
   background: var(--gold);
 }
 .file-badge-video,
-.file-badge-image { background: var(--gold); color: var(--bg); }
+.file-badge-image { background: var(--gold); color: var(--on-gold); }
 .file-x {
   position: absolute; top: 6px; right: 6px;
   width: 22px; height: 22px;
@@ -343,7 +346,7 @@ html, body {
 .pill input { position: absolute; opacity: 0; pointer-events: none; }
 .pill.on {
   background: var(--gold);
-  color: var(--bg);
+  color: var(--on-gold);
   border-color: var(--gold);
   font-weight: 500;
 }
@@ -436,7 +439,7 @@ html, body {
 .btn-generate {
   display: inline-flex; align-items: center; gap: 12px;
   background: var(--gold);
-  color: var(--bg);
+  color: var(--on-gold);
   border: 0;
   padding: 18px 44px;
   border-radius: 2px;
@@ -535,7 +538,7 @@ html, body {
 .step.is-active .dot {
   background: var(--gold);
   border-color: var(--gold);
-  color: var(--bg);
+  color: var(--on-gold);
   box-shadow: 0 0 0 4px var(--gold-dim);
   animation: pulse 1.4s ease-in-out infinite;
 }
@@ -557,9 +560,9 @@ html, body {
 }
 
 .bar {
-  width: 100%; height: 2px;
+  width: 100%; height: 4px;
   background: var(--surface2);
-  border-radius: 0;
+  border-radius: 2px;
   overflow: hidden;
 }
 .bar-fill {
@@ -612,7 +615,7 @@ html, body {
 .btn-primary {
   display: inline-flex; align-items: center; gap: 8px;
   background: var(--gold);
-  color: var(--bg);
+  color: var(--on-gold);
   font-weight: 500;
   text-decoration: none;
   padding: 12px 24px;
@@ -827,4 +830,59 @@ html, body {
   .btn-generate { padding: 14px 28px; font-size: 12px; }
   .result-actions .btn-primary,
   .result-actions .btn-secondary { flex: 1; justify-content: center; }
+}
+
+/* ============================================================
+   LIGHT THEME — engaged with data-theme="light" on <html>.
+   Shares the localStorage key 'mc-theme' with the editor so the
+   choice carries across both pages. Gold flips darker (readable as
+   text on a light bg) and --on-gold flips light (readable on the
+   darker-gold buttons), which keeps every gold role legible.
+   ============================================================ */
+html[data-theme="light"] {
+  --gold:        #8a6d1f;
+  --gold-soft:   #75591a;
+  --gold-glow:   rgba(138,109,31,0.28);
+  --gold-dim:    rgba(138,109,31,0.10);
+  --gold-line:   rgba(138,109,31,0.34);
+
+  --bg:          #f6f3ec;
+  --surface:     #ffffff;
+  --surface2:    #f1ede4;
+  --surface3:    #e7e1d4;
+  --line:        #e3dccd;
+
+  --text:        #1c1a14;
+  --text-dim:    #6a655b;
+  --text-faint:  #9b958a;
+
+  --danger:      #c0504f;
+  --success:     #8a6d1f;
+
+  --on-gold:     #fff8e6;
+
+  --shadow-1: 0 4px 18px rgba(60,50,20,0.10);
+  --shadow-2: 0 18px 60px rgba(60,50,20,0.16);
+}
+html[data-theme="light"] .topbar {
+  background: rgba(246,243,236,0.92);
+}
+
+/* ============== THEME TOGGLE BUTTON ============== */
+.theme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 15px; line-height: 1;
+  transition: all 0.15s ease;
+}
+.theme-toggle:hover {
+  border-color: var(--gold-line);
+  color: var(--gold);
+  background: var(--gold-dim);
 }

@@ -2,6 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<script>
+  // Apply the saved theme before first paint to avoid a flash. Shares the
+  // 'mc-theme' key with the wizard; defaults to light when unset.
+  try {
+    document.documentElement.dataset.theme =
+      localStorage.getItem('mc-theme') || 'light';
+  } catch (e) { document.documentElement.dataset.theme = 'light'; }
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>MotionCut — Cinematic editor</title>
 
@@ -664,8 +672,12 @@
         setTimeout(() => { badge.innerHTML = 'MCP <span class="mcp-dot">&bull;</span>'; }, 1200);
       } catch {}
     });
-    ping(); setInterval(ping, 5000);
-    pollVersion(); setInterval(pollVersion, 2000);
+    // Skip polls while the tab is hidden — no point churning the network and
+    // git subprocess when nobody is looking. MCP status rarely changes (slow
+    // cadence); external project mutations want a touch more responsiveness.
+    const whenVisible = (fn) => () => { if (document.visibilityState === 'visible') fn(); };
+    ping(); setInterval(whenVisible(ping), 15000);
+    pollVersion(); setInterval(whenVisible(pollVersion), 4000);
   })();
 </script>
 </body>

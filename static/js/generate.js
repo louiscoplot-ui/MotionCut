@@ -1206,6 +1206,7 @@ import { WorkerBridge } from './worker-bridge.js';
   async function initAsync() {
     await loadServerConfig();
     restoreProjectFiles();
+    initTheme();
 
     // Drag-drop on the dropzone (also handle window drops as a safety net).
     const dz = $('dropzone');
@@ -1423,6 +1424,26 @@ import { WorkerBridge } from './worker-bridge.js';
     renderFileGrid();
     refreshGenerateEnabled();
     syncCaptionsGroupVisibility();
+  }
+
+  // ---------- Theme toggle ----------
+  // The inline <head> script already set data-theme before paint; here we
+  // just sync the button glyph and wire the click. Key 'mc-theme' is shared
+  // with the editor so the choice carries across pages.
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    const btn = $('btn-theme');
+    if (btn) btn.textContent = t === 'light' ? '☾' : '☀';  // moon when light, sun when dark
+    try { localStorage.setItem('mc-theme', t); } catch (_) {}
+  }
+  function initTheme() {
+    let t = 'light';
+    try { t = localStorage.getItem('mc-theme') || 'light'; } catch (_) {}
+    applyTheme(t);
+    on($('btn-theme'), 'click', () => {
+      const cur = document.documentElement.dataset.theme || 'light';
+      applyTheme(cur === 'light' ? 'dark' : 'light');
+    });
   }
 
   // ---------- Music chip render ----------

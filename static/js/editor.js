@@ -4663,7 +4663,7 @@ function init() {
   });
 
   // Theme toggle
-  applyTheme(localStorage.getItem('mc-theme') || 'dark');
+  applyTheme(localStorage.getItem('mc-theme') || 'light');
   $('btn-theme')?.addEventListener('click', toggleTheme);
 
   // Projects: load list, set current from localStorage, populate library

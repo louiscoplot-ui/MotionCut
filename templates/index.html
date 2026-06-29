@@ -2,6 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash. Shares the
+    // 'mc-theme' key with the editor; defaults to light when unset.
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem('mc-theme') || 'light';
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MotionCut — AI real estate video</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -21,6 +29,7 @@
       </div>
     </div>
     <div class="topbar-right">
+      <button class="theme-toggle" id="btn-theme" type="button" title="Toggle light / dark theme" aria-label="Toggle theme">&#9728;</button>
       <a class="mode-link" href="/edit" title="Open the manual timeline editor">Timeline editor &rarr;</a>
       <span class="mcp-badge" id="mcp-badge" title="Click to copy Claude Desktop config" data-state="unknown">MCP <span class="mcp-dot">&bull;</span></span>
       <span class="build-tag mono">build <span id="build-sha">{{ build_version }}</span></span>
@@ -311,7 +320,9 @@
         } catch {}
       });
       ping();
-      setInterval(ping, 5000);
+      // MCP status is just a badge here and rarely changes — poll slowly and
+      // only while the tab is visible.
+      setInterval(() => { if (document.visibilityState === 'visible') ping(); }, 15000);
     })();
   </script>
 </body>
