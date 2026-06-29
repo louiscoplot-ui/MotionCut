@@ -119,6 +119,12 @@ def _hydrate_jobs_unlocked():
         return
     for k, v in data.items():
         if k not in JOBS and isinstance(v, dict):
+            # A job persisted as running/queued cannot still be alive: the worker
+            # thread that owned it died with the previous process. Reconcile it to
+            # an error so polling resolves instead of spinning at 0% forever.
+            if v.get("status") in ("running", "queued"):
+                v = {**v, "status": "error",
+                     "error": v.get("error") or "worker stopped before completion (orphaned job)"}
             JOBS[k] = v
 
 
@@ -126,6 +132,7 @@ def _load_jobs_from_disk():
     """Bootstrap-time hydration. Logs how many jobs were recovered."""
     with JOBS_LOCK:
         _hydrate_jobs_unlocked()
+        _persist_jobs_unlocked()
     print(f"[jobs] hydrated {len(JOBS)} job(s) from {_jobs_file()}", flush=True)
 
 
@@ -2656,7 +2663,7 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         segment_paths = [p for p, _ in kept2]
         segments     = [s for _, s in kept2]
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}.mp4"
+        out_path  = EXPORT_DIR / f"motioncut_generate_{timestamp}_{job_id}.mp4"
 
         # 4. Resolve music track (optional). Priority: uploaded file >
         # catalogue URL > silence. audio_path stays None when nothing is
@@ -2786,6 +2793,11 @@ def api_generate():
 
     if not filenames:
         return jsonify({"error": "no filenames provided"}), 400
+    # Fail fast if FFmpeg is missing rather than creating a job that is doomed
+    # to error 60s later (the source of stale "running" records on disk).
+    if not ffmpeg_available():
+        return jsonify({"error": "FFmpeg not found on the server. Install FFmpeg "
+                                 "and restart so rendering can run."}), 503
     # Validate that at least one file actually exists on disk — saves a
     # confusing 60s wait that ends in "all clips missing".
     pdir = project_dir(pid)
@@ -3023,12 +3035,12 @@ def api_export():
 
     audio_path = find_in_project(data.get("audio"))
 
+    job_id = uuid.uuid4().hex[:12]
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     template_name = re.sub(r"[^a-zA-Z0-9_-]", "_", data.get("template", "custom"))
-    out_name = f"motioncut_{template_name}_{aspect.replace(':','x')}_{timestamp}.mp4"
+    out_name = f"motioncut_{template_name}_{aspect.replace(':','x')}_{timestamp}_{job_id}.mp4"
     out_path = EXPORT_DIR / out_name
 
-    job_id = uuid.uuid4().hex[:12]
     set_job(job_id, status="queued", progress=0)
 
     t = threading.Thread(
@@ -3167,7 +3179,7 @@ def api_speed_export():
     speed_job_id = uuid.uuid4().hex[:12]
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     speed_str = (f"{speed:g}").replace(".", "p")
-    out_name = f"motioncut_speed{speed_str}x_{timestamp}.mp4"
+    out_name = f"motioncut_speed{speed_str}x_{timestamp}_{speed_job_id}.mp4"
     out_path = EXPORT_DIR / out_name
 
     set_job(speed_job_id, status="queued", progress=0,

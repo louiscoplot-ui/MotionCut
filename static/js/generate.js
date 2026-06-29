@@ -24,7 +24,9 @@ import { WorkerBridge } from './worker-bridge.js';
   let currentJobId = null;
   /** Last finished render's job_id — kept after currentJobId is cleared so
    *  the speed-export button can reference it without racing the cleanup. */
-  let lastFinishedJobId = null;
+  let lastFinishedJobId = (() => {
+    try { return sessionStorage.getItem('mc-last-job') || null; } catch (_) { return null; }
+  })();
   let lastFinishedDuration = 0;     // seconds, populated when the video loads
   let pollTimer = null;
   let renderStartedAt = 0;
@@ -168,6 +170,39 @@ import { WorkerBridge } from './worker-bridge.js';
       if (i >= 0) uploadedFiles.splice(i, 1);
       renderFileGrid();
       return null;
+    }
+  }
+
+  // Files persist on the server but uploadedFiles[] is in-memory, so a page
+  // reload or a round-trip to the editor used to blank the grid (the files
+  // were still on disk, just invisible). Re-hydrate from the project library
+  // on boot so GENERATE stays enabled across navigation.
+  async function restoreProjectFiles() {
+    try {
+      const r = await fetch('/api/projects/default/files');
+      if (!r.ok) return;
+      const d = await r.json();
+      const files = Array.isArray(d.files) ? d.files : [];
+      const known = new Set(uploadedFiles.map(f => f.filename));
+      for (const sf of files) {
+        if (sf.kind === 'audio') continue;          // music is tracked separately
+        if (known.has(sf.name)) continue;
+        uploadedFiles.push({
+          filename: sf.name, kind: sf.kind, url: sf.url,
+          localUrl: null, name: sf.name, file: null,
+          _uploading: false, _progress: 100,
+          duration: sf.duration || null, _size: sf.size || 0,
+        });
+      }
+      if (uploadedFiles.length && $('section-options') && $('section-options').hidden) {
+        showSection('section-options');
+        if ($('section-brief')) showSection('section-brief');
+        showSection('section-action');
+      }
+      renderFileGrid();
+      refreshGenerateEnabled();
+    } catch (e) {
+      console.warn('[restore]', e);
     }
   }
 
@@ -516,6 +551,7 @@ import { WorkerBridge } from './worker-bridge.js';
       $('result-video').src = s.output_url;
       $('btn-download').href = s.output_url;
       lastFinishedJobId = currentJobId;
+      try { sessionStorage.setItem('mc-last-job', currentJobId); } catch (_) {}
       resetSpeedControls();
       showSection('section-result');
       hideSection('section-progress');
@@ -1169,6 +1205,7 @@ import { WorkerBridge } from './worker-bridge.js';
 
   async function initAsync() {
     await loadServerConfig();
+    restoreProjectFiles();
 
     // Drag-drop on the dropzone (also handle window drops as a safety net).
     const dz = $('dropzone');
