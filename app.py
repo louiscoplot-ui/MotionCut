@@ -1969,7 +1969,7 @@ def build_segments_chain(segments, target_w, target_h, fps=SEGMENT_FPS):
         parts.append(
             f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
             f"crop={target_w}:{target_h},"
-            f"setsar=1,fps={fps},format=yuv420p,setpts=PTS-STARTPTS[s{i}v]"
+            f"setsar=1,format=yuv420p,setpts=PTS-STARTPTS,fps={fps}[s{i}v]"
         )
 
     # 2) Single-segment shortcut: nothing to concat.
