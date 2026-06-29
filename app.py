@@ -1345,14 +1345,22 @@ def _measure_sharpness(path, duration):
 
 def _analyze_clip_file(path, debug=False):
     """Run all analyses on one file and compose the result dict."""
-    duration = _ffprobe_duration(path)
+    _nm = os.path.basename(str(path))
+    def _step(label, fn):
+        _t0 = time.time()
+        print(f"[analyze] {_nm}: {label}…", flush=True)
+        out = fn()
+        print(f"[analyze] {_nm}: {label} done ({time.time() - _t0:.1f}s)", flush=True)
+        return out
+
+    duration = _step("probe", lambda: _ffprobe_duration(path))
     if duration <= 0:
         return {"error": "could not probe duration", "duration": 0.0}
 
-    brightness, motion, sig_raw = _ffmpeg_signalstats(path, debug=debug)
-    cuts,                cut_raw = _ffmpeg_scene_cuts(path, debug=debug)
-    audio_energy,        aud_raw = _ffmpeg_audio_energy(path, debug=debug)
-    sharpness                    = _measure_sharpness(path, duration)
+    brightness, motion, sig_raw = _step("signalstats", lambda: _ffmpeg_signalstats(path, debug=debug))
+    cuts,                cut_raw = _step("scene", lambda: _ffmpeg_scene_cuts(path, debug=debug))
+    audio_energy,        aud_raw = _step("audio", lambda: _ffmpeg_audio_energy(path, debug=debug))
+    sharpness                    = _step("sharpness", lambda: _measure_sharpness(path, duration))
 
     # Composite score:
     #   motion       → engaging clips score higher
@@ -2496,9 +2504,12 @@ def run_pipeline(job_id, pid, filenames, style, duration, format_str,
         # 1. Analyse every clip in parallel — _analyze_or_cached() handles
         #    its own caching in project.motioncut.json, so repeat clicks
         #    on the same file set are basically instant.
+        print(f"[generate] analysing {len(filenames)} clip(s): "
+              f"{[os.path.basename(f) for f in filenames]}", flush=True)
         workers = min(4, max(1, len(filenames)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             analyses = list(ex.map(lambda fn: _analyze_or_cached(pid, fn), filenames))
+        print(f"[generate] analysis complete for {len(analyses)} clip(s)", flush=True)
 
         # Sprint 6: overlay client-supplied per-clip metadata (has_face from
         # MediaPipe Worker) onto the analyses dicts. The auto-planner uses
