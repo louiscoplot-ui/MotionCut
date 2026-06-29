@@ -2367,10 +2367,20 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
     set_job(job_id, status="running", progress=0, cmd=" ".join(shlex.quote(c) for c in cmd))
 
     try:
+        # Merge stderr into stdout so a SINGLE reader drains both. With
+        # -progress pipe:1, progress goes to stdout while FFmpeg's verbose log
+        # goes to stderr; reading only stdout and draining stderr afterwards
+        # deadlocks on Windows once the 64KB stderr buffer fills (FFmpeg blocks
+        # writing stderr -> stops emitting progress -> reader blocks forever).
+        # This was the real cause of renders hanging on 4K clips.
+        _PROGRESS_KEYS = (
+            "frame=", "fps=", "stream_", "bitrate=", "total_size=",
+            "out_time", "dup_frames=", "drop_frames=", "speed=", "progress=",
+        )
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
         )
@@ -2388,10 +2398,14 @@ def run_export_job(job_id, payload, src_video, image_paths, audio_path, out_path
                     pass
             elif line.startswith("progress=") and "end" in line:
                 set_job(job_id, progress=99)
-        # Drain stderr to capture errors
-        err = proc.stderr.read() if proc.stderr else ""
+            elif line and not line.startswith(_PROGRESS_KEYS):
+                # Real FFmpeg log line — keep the tail for error reporting.
+                last_log.append(line)
+                if len(last_log) > 60:
+                    last_log.pop(0)
         proc.wait()
         if proc.returncode != 0:
+            err = "\n".join(last_log)
             set_job(job_id, status="error", error=err[-1500:] if err else "ffmpeg failed")
             return
         # url_for() requires a request context, but we're on a background
