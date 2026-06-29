@@ -1,6 +1,7 @@
 __pycache__/
 uploads/
 exports/
+graphify-out/
 node_modules/
 package-lock.json
 package.json
