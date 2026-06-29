@@ -1,4 +1,4 @@
-# MotionCut Agent Report — 20260624_051335
+# MotionCut Agent Report — 20260629_071147
 
 Mode: **OFFLINE (static analysis, no ANTHROPIC_API_KEY)**
 
@@ -6,7 +6,7 @@ Mode: **OFFLINE (static analysis, no ANTHROPIC_API_KEY)**
 - Bugs : 0 (0 BLOCKING, 0 BROKEN, 0 DEGRADED, 0 SILENT)
 - Fixes appliques auto : 0
 - Fixes a review manuelle : 0 (voir agents/patches/)
-- Score global agents : 4.3/10
+- Score global agents : n/a/10
 - Integration IA : skipped (offline)
 
 ## Top 5 bugs critiques
@@ -21,7 +21,7 @@ Mode: **OFFLINE (static analysis, no ANTHROPIC_API_KEY)**
 - voir les *_needs_api.json / *_manual.json si presents
 
 ## Evolution agents
-Score precedent : n/a -> actuel : 4.3
+Score precedent : 4.3 -> actuel : n/a
 Backlog d'evolution : ['code_fixer', 'bug_hunter']
 
 ## Commandes utiles
